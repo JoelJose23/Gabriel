@@ -23,10 +23,12 @@ fn cpu_isolation_pool() -> &'static rayon::ThreadPool {
 }
 
 struct SpeechState {
-    cpu_model: Model,
+    cpu_model: Option<Model>,
     gpu_model: Option<(Model, Device)>,
     tokenizer: Tokenizer,
     sample_rate: u32,
+    config: Config,
+    weights_path: std::path::PathBuf,
 }
 
 pub struct CandleSpeechBackend {
@@ -64,7 +66,7 @@ impl CandleSpeechBackend {
 
     fn load_blocking(model_id: String) -> Result<Self> {
         tracing::info!("candle-tts: fetching parler-tts-mini-v1 via hf-hub");
-        let weights = hub::pull_file(hub::PARLER_REPO, "model.safetensors")?;
+        let weights_path = hub::pull_file(hub::PARLER_REPO, "model.safetensors")?;
         let config_path = hub::pull_file(hub::PARLER_REPO, "config.json")?;
         let tokenizer_path = hub::pull_file(hub::PARLER_REPO, "tokenizer.json")?;
 
@@ -87,29 +89,23 @@ impl CandleSpeechBackend {
                 detail: e.to_string(),
             })?;
 
-        // Always load CPU model from mmaped safetensors for zero-cost CPU isolation
-        let vb_cpu = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights.clone()], DType::F32, &Device::Cpu)?
-        };
-        let cpu_model = Model::new(&config, vb_cpu)?;
-
-        // Try CUDA GPU model initialization if CUDA is available
+        // GPU model initialized in F32 to match Candle's parler_tts internal embeddings
         let gpu_model = match candle_core::Device::cuda_if_available(0) {
             Ok(d) => match unsafe {
-                VarBuilder::from_mmaped_safetensors(&[weights], DType::F32, &d)
+                VarBuilder::from_mmaped_safetensors(&[weights_path.clone()], DType::F32, &d)
             } {
                 Ok(vb) => match Model::new(&config, vb) {
                     Ok(m) => {
-                        tracing::info!("candle-tts: CUDA GPU model loaded successfully");
+                        tracing::info!("candle-tts: CUDA GPU model (F32) loaded successfully");
                         Some((m, d))
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to build GPU TTS model, using CPU only");
+                        tracing::warn!(error = %e, "failed to build GPU model, falling back to CPU");
                         None
                     }
                 },
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to map GPU TTS weights, using CPU only");
+                    tracing::warn!(error = %e, "failed to map GPU TTS weights, falling back to CPU");
                     None
                 }
             },
@@ -125,12 +121,26 @@ impl CandleSpeechBackend {
         Ok(Self {
             model_id,
             state: Arc::new(std::sync::Mutex::new(SpeechState {
-                cpu_model,
+                cpu_model: None, // Lazy-loaded on demand
                 gpu_model,
                 tokenizer,
                 sample_rate,
+                config,
+                weights_path,
             })),
         })
+    }
+
+    fn ensure_cpu_model(state: &mut SpeechState) -> Result<&mut Model> {
+        if state.cpu_model.is_none() {
+            tracing::info!("candle-tts: lazy loading CPU model instance in FP32");
+            let vb_cpu = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[state.weights_path.clone()], DType::F32, &Device::Cpu)?
+            };
+            let cpu_model = Model::new(&state.config, vb_cpu)?;
+            state.cpu_model = Some(cpu_model);
+        }
+        Ok(state.cpu_model.as_mut().unwrap())
     }
 
     fn synthesize_cpu_isolated(
@@ -168,11 +178,13 @@ impl CandleSpeechBackend {
         let prompt_tensor = Tensor::new(&prompt_tokens[..], &Device::Cpu)?.unsqueeze(0)?;
 
         let logits_processor = LogitsProcessor::new(0, Some(0.0), None);
-        // In debug builds use fewer steps so the test suite finishes in seconds
-        // rather than 10+ minutes; release builds use full 250 steps.
-        let max_steps: usize = if cfg!(debug_assertions) { 50 } else { 250 };
+        let estimated_steps = (prompt_tokens.len() * 12).clamp(30, 250);
+        let max_steps: usize = if cfg!(debug_assertions) { 50 } else { estimated_steps };
 
-        let codes = state.cpu_model.generate(
+        let sample_rate = state.sample_rate;
+        let cpu_model = Self::ensure_cpu_model(state)?;
+
+        let codes = cpu_model.generate(
             &prompt_tensor,
             &description_tensor,
             logits_processor,
@@ -180,20 +192,22 @@ impl CandleSpeechBackend {
         )?;
         let codes = codes.unsqueeze(0)?.to_dtype(DType::I64)?;
 
-        let pcm = state.cpu_model.audio_encoder.decode_codes(&codes)?;
+        let pcm = cpu_model.audio_encoder.decode_codes(&codes)?;
         let pcm = pcm
             .i((0, 0))?
             .to_vec1::<f32>()
             .map_err(|_| GabrielError::Backend("failed to read decoded PCM samples".into()))?;
 
-        Ok(wav_from_pcm(pcm, state.sample_rate))
+        Ok(wav_from_pcm(pcm, sample_rate))
     }
 
     fn synthesize_on_gpu(state: &mut SpeechState, text: &str, voice: &str) -> Result<Vec<u8>> {
-        let Some((ref mut model, ref device)) = state.gpu_model else {
+        if state.gpu_model.is_none() {
             return Self::synthesize_on_cpu(state, text, voice);
-        };
+        }
 
+        let sample_rate = state.sample_rate;
+        let (model, device) = state.gpu_model.as_mut().unwrap();
         let description = description_for_voice(voice);
 
         let description_tokens = state
@@ -216,7 +230,8 @@ impl CandleSpeechBackend {
         let prompt_tensor = Tensor::new(&prompt_tokens[..], device)?.unsqueeze(0)?;
 
         let logits_processor = LogitsProcessor::new(0, Some(0.0), None);
-        let max_steps: usize = if cfg!(debug_assertions) { 50 } else { 250 };
+        let estimated_steps = (prompt_tokens.len() * 12).clamp(30, 250);
+        let max_steps: usize = if cfg!(debug_assertions) { 50 } else { estimated_steps };
 
         let codes = model.generate(
             &prompt_tensor,
@@ -224,15 +239,17 @@ impl CandleSpeechBackend {
             logits_processor,
             max_steps,
         )?;
-        let codes = codes.unsqueeze(0)?.to_dtype(DType::I64)?.to_device(&Device::Cpu)?;
 
-        let pcm = model.audio_encoder.decode_codes(&codes)?;
-        let pcm = pcm
+        // Execute DAC audio decoder directly on CUDA before sending samples back to CPU
+        let codes = codes.unsqueeze(0)?.to_dtype(DType::I64)?;
+        let pcm_tensor = model.audio_encoder.decode_codes(&codes)?;
+        let pcm = pcm_tensor
             .i((0, 0))?
+            .to_device(&Device::Cpu)?
             .to_vec1::<f32>()
             .map_err(|_| GabrielError::Backend("failed to read decoded PCM samples".into()))?;
 
-        Ok(wav_from_pcm(pcm, state.sample_rate))
+        Ok(wav_from_pcm(pcm, sample_rate))
     }
 }
 

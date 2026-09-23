@@ -19,7 +19,7 @@ async fn main() {
     println!("[0/4] Pre-loading models...");
     engine.load_model("qwen-2.5-3b-instruct-q4_k_m.gguf", ModelType::Llm, Some(1_900_000_000)).await.unwrap();
     engine.load_model("sd-turbo", ModelType::Image, Some(1_600_000_000)).await.unwrap();
-    engine.load_model("parler-tts", ModelType::Tts, Some(450_000_000)).await.unwrap();
+    engine.load_model("tts_kokoro", ModelType::Tts, Some(450_000_000)).await.unwrap();
 
     let snap_pre = engine.telemetry_snapshot();
     println!("Pre-load ledger: {} bytes (models: {})", snap_pre.engine_resident_bytes, snap_pre.loaded_models.len());
@@ -61,7 +61,7 @@ async fn main() {
     let engine_tts = engine.clone();
     let tts_handle = tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(async {
-            let speech_rx = engine_tts.submit_speech("parler-tts", "Gabriel local AI engine active.".to_string(), "nova".to_string()).await.unwrap();
+            let speech_rx = engine_tts.submit_speech("tts_kokoro", "Gabriel local AI engine active.".to_string(), "nova".to_string()).await.unwrap();
             timeout(Duration::from_secs(180), speech_rx).await.unwrap().unwrap().unwrap()
         })
     });
@@ -94,7 +94,7 @@ async fn main() {
         assert!(snap.engine_resident_bytes <= HIGH_WATERMARK_BUDGET);
         println!("Ledger check (degraded mode) passed: {} <= {}", snap.engine_resident_bytes, HIGH_WATERMARK_BUDGET);
     }
-    let tts_model = snap.loaded_models.iter().find(|m| m.id == "parler-tts").unwrap();
+    let tts_model = snap.loaded_models.iter().find(|m| m.id == "tts_kokoro").unwrap();
     assert!(tts_model.vram_bytes == 450_000_000 || tts_model.vram_bytes == 0, "TTS must be 450 MB or 0, got {}", tts_model.vram_bytes);
     if tts_model.vram_bytes == 450_000_000 {
         println!("✅ TTS VRAM: 450 MB (GPU path)");

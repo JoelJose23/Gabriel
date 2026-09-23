@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::{GabrielError, Result};
-use crate::inference::hub;
 use crate::inference::TextBackend;
+use crate::inference::hub;
 use crate::types::{ChatEvent, GenParams};
 
 use candle_core::quantized::gguf_file;
@@ -102,7 +102,6 @@ impl CandleTextBackend {
     pub async fn load(model_id: String) -> Result<Self> {
         tokio::task::spawn_blocking(move || Self::load_blocking(model_id))
             .await
-            
             .map_err(|e| GabrielError::WeightLoadFailed {
                 model_id: "qwen2.5-3b".into(),
                 detail: e.to_string(),
@@ -116,33 +115,41 @@ impl CandleTextBackend {
         let tokenizer_path = hub::pull_file(hub::QWEN_TOKENIZER_REPO, "tokenizer.json")?;
 
         let before = hub::gpu_used_bytes()?;
-        let device = Device::cuda_if_available(0)
-            .map_err(|_| GabrielError::GpuQueryFailed)?;
+        let device = Device::cuda_if_available(0).map_err(|_| GabrielError::GpuQueryFailed)?;
 
-        let mut file = std::fs::File::open(&gguf_path)
-            
-            .map_err(|e| GabrielError::WeightLoadFailed { model_id: load_tag, detail: format!("{e}") })?;
+        let mut file =
+            std::fs::File::open(&gguf_path).map_err(|e| GabrielError::WeightLoadFailed {
+                model_id: load_tag,
+                detail: format!("{e}"),
+            })?;
         let content = gguf_file::Content::read(&mut file).map_err(|e| {
             tracing::error!("gguf content read failed: {e}");
-            GabrielError::WeightLoadFailed { model_id: model_id.clone(), detail: format!("{e}") }
+            GabrielError::WeightLoadFailed {
+                model_id: model_id.clone(),
+                detail: format!("{e}"),
+            }
         })?;
         let tensor_count = content.tensor_infos.len();
         let mut model = ModelWeights::from_gguf(content, &mut file, &device).map_err(|e| {
             tracing::error!("weight build failed: {e}");
-            GabrielError::WeightLoadFailed { model_id: model_id.clone(), detail: format!("{e}") }
+            GabrielError::WeightLoadFailed {
+                model_id: model_id.clone(),
+                detail: format!("{e}"),
+            }
         })?;
         let after = hub::gpu_used_bytes()?;
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            
-            .map_err(|e| GabrielError::WeightLoadFailed { model_id: "qwen-tokenizer".into(), detail: format!("{e}") })?;
-        let eos_token = *tokenizer
-            .get_vocab(true)
-            .get(IM_END)
-            .ok_or_else(|| GabrielError::WeightLoadFailed {
+        let tokenizer =
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| GabrielError::WeightLoadFailed {
+                model_id: "qwen-tokenizer".into(),
+                detail: format!("{e}"),
+            })?;
+        let eos_token = *tokenizer.get_vocab(true).get(IM_END).ok_or_else(|| {
+            GabrielError::WeightLoadFailed {
                 model_id: "qwen-tokenizer".into(),
                 detail: "missing <|im_end|> in vocab".into(),
-            })?;
+            }
+        })?;
 
         let resident_bytes = after.saturating_sub(before);
         tracing::info!(
@@ -151,7 +158,6 @@ impl CandleTextBackend {
             "candle-llm: weights resident on GPU (measured via cudarc mem_get_info delta)"
         );
 
-        model.clear_kv_cache();
         Ok(Self {
             model_id,
             state: Arc::new(Mutex::new(TextState {
@@ -180,8 +186,6 @@ impl CandleTextBackend {
             .get_ids()
             .to_vec();
 
-        state.model.clear_kv_cache();
-
         let temperature = params.temperature as f64;
         let sampling = if temperature <= 0.01 {
             Sampling::ArgMax
@@ -209,8 +213,7 @@ impl CandleTextBackend {
             logits_processor.sample(&logits)
         })();
 
-        let mut next_token =
-            sample_result.map_err(|e| format!("prompt forward failed: {e}"))?;
+        let mut next_token = sample_result.map_err(|e| format!("prompt forward failed: {e}"))?;
 
         let mut error: Option<String> = None;
         loop {
@@ -240,7 +243,10 @@ impl CandleTextBackend {
                 }
             };
             let position = prompt_len + all_tokens.len() - 1;
-            let logits = state.model.forward(&input, position).and_then(|l| l.squeeze(0));
+            let logits = state
+                .model
+                .forward(&input, position)
+                .and_then(|l| l.squeeze(0));
             let logits = match logits.and_then(|l| {
                 let start_at = all_tokens.len().saturating_sub(REPEAT_LAST_N);
                 candle_transformers::utils::apply_repeat_penalty(
@@ -277,7 +283,6 @@ impl CandleTextBackend {
     }
 }
 
-
 #[async_trait]
 impl TextBackend for CandleTextBackend {
     async fn stream_tokens(
@@ -297,7 +302,13 @@ impl TextBackend for CandleTextBackend {
                 .lock()
                 .map_err(|_| "inference state lock poisoned".to_string())
                 .and_then(|mut state| {
-                    Self::generate_blocking(&mut state, &owned_prompt, params, bridge_tx.clone(), cancel_for_worker)
+                    Self::generate_blocking(
+                        &mut state,
+                        &owned_prompt,
+                        params,
+                        bridge_tx.clone(),
+                        cancel_for_worker,
+                    )
                 });
             drop(bridge_tx);
             outcome

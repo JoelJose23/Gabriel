@@ -6,7 +6,9 @@ use parking_lot::RwLock;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::error::{GabrielError, Result};
-use crate::inference::{BackendFactory, ImageBackend, SpeechBackend, TextBackend, hub};
+#[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
+use crate::inference::hub;
+use crate::inference::{BackendFactory, ImageBackend, SpeechBackend, TextBackend};
 use crate::telemetry::Telemetry;
 use crate::types::{
     ChatEvent, GenParams, Job, JobId, JobKind, ModelRuntimeInfo, ModelSpec, ModelStatus, ModelType,
@@ -46,6 +48,31 @@ impl std::fmt::Debug for ModelHandle {
     }
 }
 
+// =========================================================================
+// FIX 1: RAII Guard to track active jobs and prevent active model LRU eviction
+// =========================================================================
+pub struct JobGuard {
+    model_id: String,
+    registry: Arc<RwLock<Registry>>,
+}
+
+impl JobGuard {
+    pub fn new(model_id: String, registry: Arc<RwLock<Registry>>) -> Self {
+        // NOTE: You must add `inc_active_jobs` to `Registry` to prevent
+        // `least_recently_used_any_idle` from selecting this model.
+        registry.write().inc_active_jobs(&model_id);
+        Self { model_id, registry }
+    }
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        // NOTE: You must add `dec_active_jobs` to `Registry`
+        self.registry.write().dec_active_jobs(&self.model_id);
+    }
+}
+// =========================================================================
+
 pub struct EngineInner {
     pub config: EngineConfig,
     pub registry: Arc<RwLock<Registry>>,
@@ -60,51 +87,6 @@ pub struct EngineInner {
 }
 
 impl EngineInner {
-    pub async fn execute(self: Arc<Self>, job: Job) {
-        self.active_jobs.fetch_add(1, Ordering::Relaxed);
-        let started = Instant::now();
-
-        tracing::trace!(job_id = %job.id, kind = ?job.kind, "executing job");
-
-        match job.kind {
-            JobKind::Chat {
-                prompt,
-                params,
-                events,
-            } => {
-                self.run_chat(&job.model_id, &prompt, params, events).await;
-            }
-            JobKind::Image {
-                prompt,
-                width,
-                height,
-                reply,
-            } => {
-                let _permit = self.image_permits.acquire().await;
-                let result = self.run_image(&job.model_id, &prompt, width, height).await;
-                let _ = reply.send(result);
-            }
-            JobKind::Speech {
-                text,
-                voice,
-                reply,
-                cpu_fallback,
-            } => {
-                let result = self
-                    .run_speech(&job.model_id, &text, &voice, cpu_fallback)
-                    .await;
-                let _ = reply.send(result);
-            }
-        }
-
-        tracing::debug!(
-            job_id = %job.id,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "job finished"
-        );
-        self.active_jobs.fetch_sub(1, Ordering::Relaxed);
-    }
-
     async fn run_chat(
         &self,
         model_id: &str,
@@ -132,7 +114,8 @@ impl EngineInner {
             return;
         };
 
-        // Touch timestamp without long write lock contention
+        // FIX 1: Lock the model's active state so it isn't evicted during a long stream
+        let _guard = JobGuard::new(real_id.clone(), self.registry.clone());
         self.touch_model(&real_id);
 
         match backend.stream_tokens(prompt, params, events.clone()).await {
@@ -158,6 +141,7 @@ impl EngineInner {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
+        tracing::info!("engine: run_image called model={} prompt_len={} size={}x{}", model_id, prompt.len(), width, height);
         let (real_id, handle) = {
             let reg = self.registry.read();
             match reg.find_matching(model_id, ModelType::Image) {
@@ -170,15 +154,19 @@ impl EngineInner {
         };
 
         let Some(backend) = handle else {
+            tracing::error!("engine: image backend not found for {}", model_id);
             return Err(GabrielError::ModelNotLoaded(model_id.to_string()));
         };
-
+        tracing::info!("engine: got backend, calling generate");
+        let _guard = JobGuard::new(real_id.clone(), self.registry.clone());
         self.touch_model(&real_id);
-
         let img_prompt = prompt.to_owned();
         let bg = backend.clone();
-
-        bg.generate(&img_prompt, width, height).await
+        eprintln!("DEBUG run_image: before bg.generate()");
+        let result = bg.generate(&img_prompt, width, height).await;
+        eprintln!("DEBUG run_image: after bg.generate()");
+        tracing::info!("engine: generate returned: {:?}", result.is_ok());
+        result
     }
 
     async fn run_speech(
@@ -203,6 +191,8 @@ impl EngineInner {
             return Err(GabrielError::ModelNotLoaded(model_id.to_string()));
         };
 
+        // FIX 1: Lock TTS job
+        let _guard = JobGuard::new(real_id.clone(), self.registry.clone());
         self.touch_model(&real_id);
 
         let tts_text = text.to_owned();
@@ -214,7 +204,6 @@ impl EngineInner {
 
     #[inline]
     fn touch_model(&self, model_id: &str) {
-        // Quick touch helper to minimize hold duration
         self.registry.write().touch(model_id);
     }
 }
@@ -282,7 +271,10 @@ impl EngineState {
         }
 
         pager.spawn_loop();
-        tokio::spawn(dispatch::run(rx, Self(inner.clone())));
+
+        // EngineState handles execution loop to allow JIT loading checks
+        let state = Self(inner.clone());
+        tokio::spawn(dispatch::run(rx, state.clone()));
 
         tracing::info!(
             host = %config.host,
@@ -291,7 +283,81 @@ impl EngineState {
             "engine initialized"
         );
 
-        Self(inner)
+        state
+    }
+
+    // FIX 2: Execute resides on EngineState to allow `ensure_ready` directly before processing
+    pub async fn execute(&self, job: Job) {
+        self.inner().active_jobs.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
+
+        tracing::trace!(job_id = %job.id, kind = ?job.kind, "executing job");
+
+        match job.kind {
+            JobKind::Chat {
+                prompt,
+                params,
+                events,
+            } => {
+                // Ensure loaded directly before use in case it was queued during an LRU sweep
+                match self.ensure_ready(&job.model_id, ModelType::Llm).await {
+                    Ok(real_id) => {
+                        self.inner()
+                            .run_chat(&real_id, &prompt, params, events)
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = events.send(ChatEvent::Failed(e.to_string())).await;
+                    }
+                }
+            }
+            JobKind::Image {
+                prompt,
+                width,
+                height,
+                reply,
+            } => {
+                tracing::info!("engine: executing image job, acquiring semaphore");
+                let _permit = self.inner().image_permits.acquire().await;
+                tracing::info!("engine: semaphore acquired, ensuring ready");
+                eprintln!("DEBUG execute: job_id={} reply={:p}", job.id, &reply as *const _);
+                let result = match self.ensure_ready(&job.model_id, ModelType::Image).await {
+                    Ok(real_id) => {
+                        self.inner()
+                            .run_image(&real_id, &prompt, width, height)
+                            .await
+                    }
+                    Err(e) => Err(e.into()),
+                };
+                tracing::info!("engine: image job result: {:?}", result.is_ok());
+                eprintln!("DEBUG execute: sending result through reply={:p}", &reply);
+                let _ = reply.send(result);
+                eprintln!("DEBUG execute: send completed");
+            }
+            JobKind::Speech {
+                text,
+                voice,
+                reply,
+                cpu_fallback,
+            } => {
+                let result = match self.ensure_ready(&job.model_id, ModelType::Tts).await {
+                    Ok(real_id) => {
+                        self.inner()
+                            .run_speech(&real_id, &text, &voice, cpu_fallback)
+                            .await
+                    }
+                    Err(e) => Err(e.into()),
+                };
+                let _ = reply.send(result);
+            }
+        }
+
+        tracing::debug!(
+            job_id = %job.id,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "job finished"
+        );
+        self.inner().active_jobs.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn inner(&self) -> &EngineInner {
@@ -320,7 +386,6 @@ impl EngineState {
 
         let slot_limit = self.inner().config.max_loaded_models;
 
-        // Eviction with infinite loop safeguard
         let mut attempts = 0;
         while self.inner().registry.read().len() >= slot_limit {
             attempts += 1;
@@ -353,6 +418,8 @@ impl EngineState {
         })?;
 
         let mut final_spec = spec.clone();
+
+        // FIX 3: Reconcile actual allocation delta directly instead of double-counting.
         if let Some(measured) = handle.measured_vram_bytes() {
             tracing::info!(
                 model = %model_id,
@@ -360,6 +427,13 @@ impl EngineState {
                 measured_bytes = measured,
                 "reconciling VRAM budget with measured allocation"
             );
+            if measured > spec.vram_bytes {
+                let _ = self.inner().pager.admit(measured - spec.vram_bytes);
+            } else if measured < spec.vram_bytes {
+                self.inner()
+                    .pager
+                    .on_demoted_or_unloaded(spec.vram_bytes - measured);
+            }
             final_spec.vram_bytes = measured;
         }
 
@@ -369,7 +443,8 @@ impl EngineState {
             reg.promote(model_id, handle);
         }
 
-        self.inner().pager.on_promoted(final_spec.vram_bytes);
+        // Note: Removed `self.inner().pager.on_promoted(...)` to fix double-counting,
+        // as the actual budget state is already fully settled by admit/demote checks above.
 
         tracing::info!(
             model = %model_id,
@@ -451,7 +526,9 @@ impl EngineState {
                         entry.spec.model_type, expected
                     )));
                 }
-                if (entry.residency == Residency::Gpu || expected == ModelType::Tts) && entry.handle.is_some() {
+                if (entry.residency == Residency::Gpu || expected == ModelType::Tts)
+                    && entry.handle.is_some()
+                {
                     let real_id = matched_id.to_string();
                     drop(reg);
                     self.inner().touch_model(&real_id);
@@ -477,6 +554,7 @@ impl EngineState {
         prompt: String,
         params: GenParams,
     ) -> Result<mpsc::Receiver<ChatEvent>> {
+        // Fast-fail before queueing
         let model_id = self.ensure_ready(model_id, ModelType::Llm).await?;
 
         let (tx, rx) = mpsc::channel::<ChatEvent>(256);
@@ -502,7 +580,9 @@ impl EngineState {
         width: u32,
         height: u32,
     ) -> Result<oneshot::Receiver<std::result::Result<Vec<u8>, GabrielError>>> {
+        tracing::info!("engine: submit_image model={} prompt_len={}", model_id, prompt.len());
         let model_id = self.ensure_ready(model_id, ModelType::Image).await?;
+        tracing::info!("engine: ensure_ready passed model={}", model_id);
 
         let (tx, rx) = oneshot::channel();
         let job = Job {
@@ -518,6 +598,7 @@ impl EngineState {
         };
 
         self.enqueue(job).await?;
+        tracing::info!("engine: image job enqueued");
         Ok(rx)
     }
 
@@ -539,7 +620,7 @@ impl EngineState {
         };
         let available_vram_budget = vram_limit.saturating_sub(snap.engine_resident_bytes as usize);
 
-        #[cfg(any(feature = "candle-cuda", feature = "tts-parler"))]
+        #[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
         let cpu_fallback = {
             let actual_free = {
                 let gpu_used = hub::gpu_used_bytes().unwrap_or(0);
@@ -565,24 +646,26 @@ impl EngineState {
             }
             is_cpu
         };
-        #[cfg(not(any(feature = "candle-cuda", feature = "tts-parler")))]
+        #[cfg(not(any(feature = "candle-cuda", feature = "tts-kokoro")))]
         let cpu_fallback = {
             let is_cpu =
                 available_vram_budget != usize::MAX && available_vram_budget < tts_vram_required;
+
+            // FIX 4: Corrected telemetry logic to prevent reporting memory usage as free limit.
             if is_cpu {
                 tracing::info!(
                     free_mb = available_vram_budget / 1_000_000,
                     "VRAM budget tight. Fallback TTS to CPU."
                 );
-            } else {
-                let free_disp = if available_vram_budget == usize::MAX {
-                    snap.engine_resident_bytes as usize
-                } else {
-                    available_vram_budget
-                };
+            } else if available_vram_budget == usize::MAX {
                 tracing::info!(
-                    free_mb = free_disp / 1_000_000,
-                    "VRAM budget available. Routing TTS to CUDA."
+                    resident_mb = snap.engine_resident_bytes as usize / 1_000_000,
+                    "VRAM untracked on non-CUDA platform. Routing TTS."
+                );
+            } else {
+                tracing::info!(
+                    free_mb = available_vram_budget / 1_000_000,
+                    "VRAM budget available. Routing TTS."
                 );
             }
             is_cpu

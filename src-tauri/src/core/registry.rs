@@ -12,6 +12,7 @@ pub struct ModelEntry {
     pub handle: Option<ModelHandle>,
     pub loaded_at: Instant,
     pub last_used: Instant,
+    pub active_jobs: usize,
 }
 
 impl ModelEntry {
@@ -23,6 +24,7 @@ impl ModelEntry {
             handle: None,
             loaded_at: now,
             last_used: now,
+            active_jobs: 0,
         }
     }
 }
@@ -112,6 +114,18 @@ impl Registry {
         }
     }
 
+    pub fn inc_active_jobs(&mut self, id: &str) {
+        if let Some(e) = self.models.get_mut(id) {
+            e.active_jobs += 1;
+        }
+    }
+
+    pub fn dec_active_jobs(&mut self, id: &str) {
+        if let Some(e) = self.models.get_mut(id) {
+            e.active_jobs = e.active_jobs.saturating_sub(1);
+        }
+    }
+
     pub fn resident_ids(&self) -> Vec<String> {
         self.models
             .iter()
@@ -123,7 +137,9 @@ impl Registry {
     pub fn least_recently_used_resident(&self) -> Option<String> {
         self.models
             .iter()
-            .filter(|(_, e)| e.residency == Residency::Gpu && e.handle.is_some())
+            .filter(|(_, e)| {
+                e.residency == Residency::Gpu && e.handle.is_some() && e.active_jobs == 0
+            })
             .min_by_key(|(_, e)| e.last_used)
             .map(|(id, _)| id.clone())
     }
@@ -142,7 +158,7 @@ impl Registry {
         let cutoff = Instant::now() - min_age;
         self.models
             .iter()
-            .filter(|(_, e)| e.last_used < cutoff)
+            .filter(|(_, e)| e.last_used < cutoff && e.active_jobs == 0)
             .min_by_key(|(_, e)| e.last_used)
             .map(|(id, _)| id.clone())
     }
@@ -152,7 +168,12 @@ impl Registry {
         let mut ids: Vec<(Instant, String)> = self
             .models
             .iter()
-            .filter(|(_, e)| e.residency == Residency::Gpu && e.handle.is_some() && e.last_used < cutoff)
+            .filter(|(_, e)| {
+                e.residency == Residency::Gpu
+                    && e.handle.is_some()
+                    && e.last_used < cutoff
+                    && e.active_jobs == 0
+            })
             .map(|(id, e)| (e.last_used, id.clone()))
             .collect();
         ids.sort_by_key(|(t, _)| *t);

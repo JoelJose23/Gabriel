@@ -2,7 +2,7 @@
 
 A native, zero-crash, multi-modal **local AI engine** written in Rust. Gabriel runs
 OpenAI-compatible inference entirely on your machine — no cloud, no telemetry — with a
-hardware-aware resource governor that makes CUDA out-of-memory crashes structurally
+hardware-aware resource governor that structurally prevents CUDA out-of-memory crashes and manages memory bandwidth consumption across diverse workloads.
 impossible.
 
 It is designed as the backend for a Tauri v2 + React desktop app, but the HTTP surface is
@@ -25,7 +25,7 @@ standard OpenAI REST, so any OpenAI SDK, LangChain pipeline, or `curl` can drive
 | Telemetry | Live GPU name/utilisation, VRAM budget ledger, RAM, CPU, per-model idle times |
 | Tauri IPC | Strongly typed commands: `load_model`, `unload_model`, `offload_model`, `get_telemetry`, `list_loaded_models` |
 
-### The zero-crash guarantee
+## Core Guarantees & Advancements
 
 Every model carries a VRAM budget. Before anything touches the GPU, the memory pager:
 

@@ -42,7 +42,7 @@ pub enum GabrielError {
 
 pub type Result<T> = std::result::Result<T, GabrielError>;
 
-#[cfg(any(feature = "candle-cuda", feature = "tts-parler"))]
+#[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
 impl From<candle_core::Error> for GabrielError {
     fn from(e: candle_core::Error) -> Self {
         Self::Kernel(format!("{e}"))
