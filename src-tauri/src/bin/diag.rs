@@ -17,7 +17,7 @@ async fn main() {
     let s2 = engine.telemetry_snapshot();
     println!("after image: resident={} models={:?}", s2.engine_resident_bytes, s2.loaded_models);
     
-    engine.load_model("parler-tts", ModelType::Tts, Some(450_000_000)).await.unwrap();
+    engine.load_model("tts_kokoro", ModelType::Tts, Some(450_000_000)).await.unwrap();
     let s3 = engine.telemetry_snapshot();
     println!("after tts: resident={} models={:?}", s3.engine_resident_bytes, s3.loaded_models);
     println!("vram_total {} vram_used {}", s3.vram_total_bytes, s3.vram_used_bytes);

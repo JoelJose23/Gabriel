@@ -11,13 +11,14 @@ use crate::types::{GenParams, ModelSpec};
 
 #[cfg(feature = "candle-cuda")]
 pub mod candle_backend;
-#[cfg(any(feature = "candle-cuda", feature = "tts-parler"))]
+#[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
 pub(crate) mod hub;
 #[cfg(feature = "candle-cuda")]
+pub mod image;
+#[cfg(feature = "candle-cuda")]
 pub mod image_candle;
-#[cfg(feature = "tts-parler")]
-pub mod tts_candle;
-pub mod tts_parler;
+#[cfg(feature = "tts-kokoro")]
+pub mod tts_kokoro;
 
 #[async_trait]
 pub trait TextBackend: Send + Sync + std::fmt::Debug {
@@ -67,9 +68,14 @@ impl BackendFactory {
             || lower.contains("sd2")
             || lower.contains("turbo")
             || lower.contains("stable-diffusion")
-            || lower.contains("parler")
+            || lower.contains("dreamshaper")
+            || lower.contains("lykon")
+            || lower.contains("lcm")
+            || lower.contains("kokoro")
             || lower.ends_with(".gguf")
             || lower.ends_with(".safetensors");
+        #[cfg(not(any(feature = "candle-cuda", feature = "tts-kokoro")))]
+        let _ = is_real;
 
         #[cfg(feature = "candle-cuda")]
         if is_real {
@@ -79,7 +85,11 @@ impl BackendFactory {
                     return Ok(ModelHandle::Text(Arc::new(backend)));
                 }
                 crate::types::ModelType::Image => {
-                    let backend = image_candle::CandleImageBackend::load(
+                    // DreamShaper-8-LCM is the active image backend. Legacy
+                    // "sd-turbo" ids are routed here too (SD-Turbo weights are
+                    // preserved in `hub::SdTurboFiles` for a future re-enable
+                    // but no longer pulled).
+                    let backend = image::DreamShaperBackend::load(
                         spec.id.clone(),
                         self.governor.clone(),
                     )
@@ -90,9 +100,9 @@ impl BackendFactory {
             }
         }
 
-        #[cfg(feature = "tts-parler")]
+        #[cfg(feature = "tts-kokoro")]
         if is_real && spec.model_type == crate::types::ModelType::Tts {
-            let backend = tts_candle::CandleSpeechBackend::load(spec.id.clone()).await?;
+            let backend = tts_kokoro::KokoroSpeechBackend::load(spec.id.clone()).await?;
             return Ok(ModelHandle::Speech(Arc::new(backend)));
         }
 

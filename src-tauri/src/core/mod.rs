@@ -32,7 +32,7 @@ impl Default for EngineConfig {
             idle_offload_after: Duration::from_secs(120),
             pager_poll_interval: Duration::from_secs(2),
             queue_capacity: 256,
-            max_concurrent_image_jobs: 1,
+            max_concurrent_image_jobs: 4,
             auto_load_on_request: false,
             bandwidth_ceiling_percent: 80.0,
             max_bandwidth_yield: Duration::from_millis(250),

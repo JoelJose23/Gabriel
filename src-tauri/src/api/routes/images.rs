@@ -8,6 +8,7 @@ use crate::types::openai::{
     ImageData, ImageGenerationRequest, ImageGenerationResponse,
 };
 
+#[axum::debug_handler]
 pub async fn images_generations(
     State(engine): State<EngineState>,
     Json(req): Json<ImageGenerationRequest>,
@@ -23,7 +24,8 @@ pub async fn images_generations(
         )));
     }
 
-    let (width, height) = parse_size(req.size.as_deref())?;
+    // FIX: Explicitly convert GabrielError -> ApiError
+    let (width, height) = parse_size(req.size.as_deref()).map_err(ApiError)?;
     let n = req.n.clamp(1, 4);
     let model_id = req.model.unwrap_or_else(|| "gabriel-diffusion".into());
 

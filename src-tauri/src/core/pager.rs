@@ -5,6 +5,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::error::{GabrielError, Result};
 use crate::telemetry::Telemetry;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::registry::Registry;
 
@@ -275,11 +276,28 @@ impl MemoryPager {
         })
     }
 
-    pub fn admit(&self, incoming_bytes: u64) -> Result<()> {
-        if !self.config.preflight_check_enabled {
+    pub fn admit(&self, required_bytes: u64) -> Result<()> {
+        let gpu_sample = self.telemetry.gpu_sample();
+
+        // If GPU VRAM is untracked (0 bytes), bypass VRAM budget enforcement
+        if gpu_sample.total_bytes == 0 {
+            self.charge(required_bytes);
             return Ok(());
         }
-        self.preflight(incoming_bytes)
+
+        let limit = (gpu_sample.total_bytes as f64 * self.config.high_watermark) as u64;
+        let current_resident = self.engine_resident_bytes();
+        let available = limit.saturating_sub(current_resident);
+
+        if required_bytes > available {
+            return Err(GabrielError::VramExhausted {
+                required_bytes,
+                available_bytes: available,
+            });
+        }
+
+        self.charge(required_bytes);
+        Ok(())
     }
 
     pub fn demote(&self, id: &str) {

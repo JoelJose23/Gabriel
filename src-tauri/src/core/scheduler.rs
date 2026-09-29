@@ -1,6 +1,7 @@
+use std::ptr;
 use tokio::sync::mpsc;
 
-use crate::types::{Job, Priority};
+use crate::types::{Job, JobKind, Priority};
 
 #[derive(Debug)]
 pub struct Scheduler {
@@ -31,8 +32,18 @@ impl Scheduler {
 
     pub async fn submit(&self, job: Job) -> Result<(), Job> {
         match job.priority {
-            Priority::Interactive => self.high.send(job).await.map_err(|e| e.0),
-            Priority::Standard => self.standard.send(job).await.map_err(|e| e.0),
+            Priority::Interactive => {
+                if let JobKind::Image { reply, .. } = &job.kind {
+                    eprintln!("DEBUG scheduler submit: job_id={} reply={:p}", job.id, ptr::from_ref(reply));
+                }
+                self.high.send(job).await.map_err(|e| e.0)
+            }
+            Priority::Standard => {
+                if let JobKind::Image { reply, .. } = &job.kind {
+                    eprintln!("DEBUG scheduler submit: job_id={} reply={:p}", job.id, ptr::from_ref(reply));
+                }
+                self.standard.send(job).await.map_err(|e| e.0)
+            }
         }
     }
 
@@ -47,18 +58,18 @@ impl Scheduler {
 
 pub mod dispatch {
 
-
+    use std::ptr;
     use crate::core::engine::EngineState;
-    use crate::types::Job;
+    use crate::types::{Job, JobKind};
 
-    use super::{SchedulerReceiver, Priority};
+    use super::{Priority, SchedulerReceiver};
 
     async fn recv_biased(
         rx: &mut SchedulerReceiver,
         high_open: &mut bool,
         standard_open: &mut bool,
     ) -> Option<Job> {
-        if *high_open && *standard_open {
+        let result = if *high_open && *standard_open {
             tokio::select! {
                 biased;
                 job = rx.high.recv() => match job {
@@ -82,7 +93,13 @@ pub mod dispatch {
             rx.standard.recv().await
         } else {
             None
+        };
+        if let Some(ref job) = result {
+            if let JobKind::Image { reply, .. } = &job.kind {
+                eprintln!("DEBUG recv_biased: job_id={} reply={:p}", job.id, ptr::from_ref(reply));
+            }
         }
+        result
     }
 
     pub async fn run(mut rx: SchedulerReceiver, engine: EngineState) {
@@ -108,9 +125,12 @@ pub mod dispatch {
                 "dequeued job"
             );
 
-            let inner = engine.inner_arc();
+            let job_id = job.id;
+            let state = engine.clone();
             tokio::spawn(async move {
-                inner.execute(job).await;
+                tracing::info!("scheduler: spawned execute for job {}", job_id);
+                state.execute(job).await;
+                tracing::info!("scheduler: execute completed for job {}", job_id);
             });
         }
 

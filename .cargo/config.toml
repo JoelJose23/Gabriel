@@ -2,3 +2,9 @@
 # Map it to CUDA 13.0 bindings which are backward compatible.
 [env]
 CUDARC_CUDA_VERSION = "13000"
+
+# kokoro-tiny -> espeak-rs-sys needs these system libs at link time,
+# otherwise you get: undefined symbol: sonicDestroyStream, audio_object_*, etc.
+# (Same fix as: RUSTFLAGS="-L /usr/lib -l espeak-ng -l sonic -l pcaudio")
+[build]
+rustflags = ["-L", "/usr/lib", "-l", "espeak-ng", "-l", "sonic", "-l", "pcaudio"]

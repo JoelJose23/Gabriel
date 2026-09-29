@@ -27,7 +27,7 @@ impl ModelType {
     pub fn default_vram_budget(&self) -> u64 {
         match self {
             Self::Llm => 1_900_000_000,
-            Self::Image => 1_600_000_000,
+            Self::Image => 2_500_000_000, // UNet + CLIP + VAE on GPU (fp16)
             Self::Tts => 0, // TTS runs on CPU, charges zero VRAM
             Self::Asr => 512 * 1024 * 1024,
             Self::Embedding => 256 * 1024 * 1024,
@@ -60,7 +60,10 @@ impl ModelSpec {
             || lower.contains("sd2")
             || lower.contains("turbo")
             || lower.contains("stable-diffusion")
-            || lower.contains("parler")
+            || lower.contains("dreamshaper")
+            || lower.contains("lykon")
+            || lower.contains("lcm")
+            || lower.contains("kokoro")
             || lower.ends_with(".gguf")
             || lower.ends_with(".safetensors");
 

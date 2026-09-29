@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
@@ -29,6 +29,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.33"
 rayon = "1.10"
+kokoro-tiny = { version = "0.1.0", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 nvml-wrapper = { version = "0.10", optional = true }
@@ -41,23 +42,23 @@ default = ["nvml", "candle-cuda"]
 nvml = ["dep:nvml-wrapper"]
 metal = ["dep:metal"]
 candle-cuda = ["dep:candle-core", "dep:candle-transformers", "dep:candle-kernels", "dep:tokenizers", "dep:hf-hub", "dep:image", "dep:candle-nn"]
-tts-parler = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers", "dep:hf-hub"]
+tts-kokoro = ["dep:candle-core", "dep:candle-transformers", "dep:candle-nn", "dep:tokenizers", "dep:hf-hub", "dep:kokoro-tiny"]
 
 [dependencies.candle-core]
-git = "https://github.com/huggingface/candle.git"
-features = ["cuda", "ug"]
+version = "0.8"
+features = ["cuda"]
 optional = true
 
 [dependencies.candle-transformers]
-git = "https://github.com/huggingface/candle.git"
+version = "0.8"
 optional = true
 
 [dependencies.candle-kernels]
-git = "https://github.com/huggingface/candle.git"
+version = "0.8"
 optional = true
 
 [dependencies.candle-nn]
-git = "https://github.com/huggingface/candle.git"
+version = "0.8"
 features = ["cuda"]
 optional = true
 
@@ -70,7 +71,6 @@ version = "0.5.0"
 default-features = false
 features = ["tokio", "ureq"]
 optional = true
-
 
 [dependencies.image]
 version = "0.25"

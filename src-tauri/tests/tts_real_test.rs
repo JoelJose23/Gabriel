@@ -1,16 +1,16 @@
-#![cfg(feature = "tts-parler")]
+#![cfg(feature = "tts-kokoro")]
 
 use gabriel_lib::core::engine::EngineState;
 use gabriel_lib::core::EngineConfig;
-use gabriel_lib::inference::tts_candle::CandleSpeechBackend;
+use gabriel_lib::inference::tts_kokoro::KokoroSpeechBackend;
 use gabriel_lib::inference::SpeechBackend;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "downloads parler-tts-mini-v1 (~1 GB) and runs slow CPU inference; run with `cargo test --features tts-parler -- --ignored`"]
-async fn parler_synthesizes_wav_without_touching_vram() {
-    let backend = CandleSpeechBackend::load("parler-mini-test".into())
+#[ignore = "downloads tts_kokoro (~1 GB) and runs slow CPU inference; run with `cargo test --features tts-kokoro -- --ignored`"]
+async fn kokoro_synthesizes_wav_without_touching_vram() {
+    let backend = KokoroSpeechBackend::load("kokoro-82m".into())
         .await
-        .expect("parler load must succeed");
+        .expect("kokoro load must succeed");
 
     let t0 = std::time::Instant::now();
     let wav = backend.synthesize("Hello from Gabriel.", "nova", true).await;
