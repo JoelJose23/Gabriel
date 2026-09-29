@@ -64,7 +64,7 @@ async fn main() {
     // 2. Start Image Gen in the BACKGROUND (Image of an Angel)
     println!("\n--- [1/3] Dispatched Image Generation (Running in background) ---");
     let image_t0 = Instant::now();
-    let img_prompt = "Epic back view silhouette of a lone archangel standing on a high mountain peak, enormous feathered wings clearly separated and spread wide against a giant glowing full moon, dark dramatic night sky, crisp cinematic lighting".to_string();
+    let img_prompt = "Epic back view silhouette of a lone archangel standing on a high mountain peak, enormous feathered wings clearly separated and sunset with soft glows on the wings, crisp cinematic lighting".to_string();
     let img_rx = engine
         .submit_image(IMAGE_ID, img_prompt, 512, 512)
         .await
@@ -157,7 +157,7 @@ async fn main() {
         "expected real PNG from diffusion, got stub BMP?"
     );
     std::fs::write("/tmp/gabriel_showcase.png", &png).expect("write png");
-    println!("saved /tmp/gabriel_showcase.png (PNG magic OK, NOT stub BMP)");
+    println!("saved /Gabriel/gabriel_final_slide.png (PNG magic OK, NOT stub BMP)");
 
     let snap = engine.telemetry_snapshot();
     println!("\n=== DONE: Pipeline Complete ===");
