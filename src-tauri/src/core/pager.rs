@@ -5,7 +5,6 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::error::{GabrielError, Result};
 use crate::telemetry::Telemetry;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::registry::Registry;
 
@@ -69,7 +68,7 @@ pub struct VramSnapshot {
 }
 
 pub struct MemoryPager {
-    config: PagerConfig,
+    config: Arc<RwLock<PagerConfig>>,
     telemetry: Arc<Telemetry>,
     registry: Arc<RwLock<Registry>>,
     /// Bytes tracked by the engine (model weights only)
@@ -109,7 +108,7 @@ impl MemoryPager {
         registry: Arc<RwLock<Registry>>,
     ) -> Self {
         Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             telemetry,
             registry,
             engine_resident_bytes: Arc::new(Mutex::new(0)),
@@ -148,6 +147,18 @@ impl MemoryPager {
         self.discharge(vram_bytes);
     }
 
+    /// Hot-apply watermark / idle-offload changes from `PUT /v1/config`.
+    pub fn update_watermarks(&self, high: f64, low: f64, idle_offload_after: Duration) {
+        {
+            let mut cfg = self.config.write();
+            cfg.high_watermark = high;
+            cfg.low_watermark = low;
+            cfg.idle_offload_after = idle_offload_after;
+        }
+        // Invalidate the cached snapshot so the next read reflects new pressure bands.
+        *self.last_snapshot.lock() = None;
+    }
+
     /// Compute a live VRAM snapshot, distinguishing engine-tracked allocations
     /// from untracked dynamic memory (KV cache, activations, fragmentation).
     ///
@@ -164,6 +175,7 @@ impl MemoryPager {
 
         let sample = self.telemetry.gpu_sample();
         let tracked = self.engine_resident_bytes();
+        let cfg = self.config.read().clone();
         let mut snap = VramSnapshot {
             total_bytes: sample.total_bytes,
             used_bytes: sample.used_bytes,
@@ -176,9 +188,9 @@ impl MemoryPager {
         if sample.total_bytes > 0 {
             snap.untracked_bytes = sample.used_bytes.saturating_sub(tracked);
             snap.utilization_ratio = sample.used_bytes as f64 / sample.total_bytes as f64;
-            snap.pressure = if snap.utilization_ratio >= self.config.high_watermark {
+            snap.pressure = if snap.utilization_ratio >= cfg.high_watermark {
                 MemoryPressure::Critical
-            } else if snap.utilization_ratio >= self.config.low_watermark {
+            } else if snap.utilization_ratio >= cfg.low_watermark {
                 MemoryPressure::Moderate
             } else {
                 MemoryPressure::None
@@ -202,8 +214,9 @@ impl MemoryPager {
         if snap.total_bytes == 0 {
             return u64::MAX;
         }
-        let cap = (snap.total_bytes as f64 * self.config.high_watermark) as u64;
-        let margin = self.config.vram_safety_margin_bytes;
+        let cfg = self.config.read().clone();
+        let cap = (snap.total_bytes as f64 * cfg.high_watermark) as u64;
+        let margin = cfg.vram_safety_margin_bytes;
         cap.saturating_sub(snap.used_bytes).saturating_sub(margin)
     }
 
@@ -221,7 +234,8 @@ impl MemoryPager {
             return Ok(());
         }
 
-        let budget_cap = (snap.total_bytes as f64 * self.config.high_watermark) as u64;
+        let cfg = self.config.read().clone();
+        let budget_cap = (snap.total_bytes as f64 * cfg.high_watermark) as u64;
 
         if incoming_bytes > budget_cap {
             return Err(GabrielError::VramExhausted {
@@ -238,10 +252,7 @@ impl MemoryPager {
         // Not enough headroom: try to evict idle models first (Lemonade's
         // EvictionEngine behavior), then re-check.
         let mut freed = 0u64;
-        let candidates = self
-            .registry
-            .read()
-            .evictable_idle(self.config.idle_offload_after);
+        let candidates = self.registry.read().evictable_idle(cfg.idle_offload_after);
         for id in candidates {
             if freed >= incoming_bytes.saturating_sub(headroom) {
                 break;
@@ -261,8 +272,8 @@ impl MemoryPager {
 
         let snap_after = self.vram_snapshot();
         let headroom_after = {
-            let cap = (snap_after.total_bytes as f64 * self.config.high_watermark) as u64;
-            let margin = self.config.vram_safety_margin_bytes;
+            let cap = (snap_after.total_bytes as f64 * cfg.high_watermark) as u64;
+            let margin = cfg.vram_safety_margin_bytes;
             cap.saturating_sub(snap_after.used_bytes)
                 .saturating_sub(margin)
         };
@@ -285,7 +296,10 @@ impl MemoryPager {
             return Ok(());
         }
 
-        let limit = (gpu_sample.total_bytes as f64 * self.config.high_watermark) as u64;
+        let limit = {
+            let cfg = self.config.read();
+            (gpu_sample.total_bytes as f64 * cfg.high_watermark) as u64
+        };
         let current_resident = self.engine_resident_bytes();
         let available = limit.saturating_sub(current_resident);
 
@@ -334,17 +348,15 @@ impl MemoryPager {
         // internal ledger. Lemonade's GlobalVramMonitor drives eviction from
         // real GPU pressure, precisely because the ledger drifts from reality
         // during inference (KV cache growth, activation memory, fragmentation).
-        if snap.utilization_ratio <= self.config.high_watermark {
+        let cfg = self.config.read().clone();
+        if snap.utilization_ratio <= cfg.high_watermark {
             return;
         }
 
-        let target_used = (snap.total_bytes as f64 * self.config.low_watermark) as u64;
+        let target_used = (snap.total_bytes as f64 * cfg.low_watermark) as u64;
         let mut to_free = snap.used_bytes.saturating_sub(target_used);
 
-        let candidates = self
-            .registry
-            .read()
-            .evictable_idle(self.config.idle_offload_after);
+        let candidates = self.registry.read().evictable_idle(cfg.idle_offload_after);
 
         for id in candidates {
             if to_free == 0 {
@@ -368,7 +380,8 @@ impl MemoryPager {
     pub fn spawn_loop(self: &Arc<Self>) {
         let pager = self.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(pager.config.poll_interval);
+            let poll_interval = pager.config.read().poll_interval;
+            let mut tick = tokio::time::interval(poll_interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;

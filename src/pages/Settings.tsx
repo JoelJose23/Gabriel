@@ -1,26 +1,22 @@
 import type { FC } from 'react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  ChevronRight,
-  Trash2,
-  RotateCcw,
   Info,
   Check,
-  Database,
   Sliders,
-  Cpu,
-  Shield,
-  HardDrive,
-  Palette,
   Keyboard,
   Settings as SettingsIcon,
   Minus,
   Plus,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 import { settingsSections } from '../data/mockData';
 import { useAccentTheme } from '../hooks/useAccentTheme';
 import { useTheme } from '../hooks/useTheme';
 import { Select } from '../components/shared/Select';
+import { getHealth, getConfig, putConfig } from '../api';
+import type { EngineConfig, HealthResponse } from '../types/api';
 
 const sections = settingsSections;
 type SectionId = typeof sections[number]['id'];
@@ -127,77 +123,144 @@ const Toggle: FC<{ defaultChecked?: boolean; checked?: boolean; onChange?: (val:
   );
 };
 
+const idleOptions = [
+  { value: '300', label: '5 minutes' },
+  { value: '900', label: '15 minutes' },
+  { value: '1800', label: '30 minutes' },
+  { value: '3600', label: '1 hour' },
+  { value: '7200', label: '2 hours' },
+];
+
 export const Settings: FC = () => {
   const [activeSection, setActiveSection] = useState<SectionId>('general');
-  const [startupPage, setStartupPage] = useState('/');
-  const [fontDensity, setFontDensity] = useState('medium');
-  const [enginePerfMode, setEnginePerfMode] = useState('balanced');
   const [isMac, setIsMac] = useState(false);
 
-  // Engine Governor Settings (core::EngineConfig)
-  const [vramHighWatermark, setVramHighWatermark] = useState(85);
-  const [vramLowWatermark, setVramLowWatermark] = useState(60);
-  const [idleOffloadTimeout, setIdleOffloadTimeout] = useState('15');
-  const [bandwidthCeiling, setBandwidthCeiling] = useState('24');
+  // Live engine config (GET/PUT /v1/config)
+  const [config, setConfig] = useState<EngineConfig | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+
+  // Governor form state (watermarks are stored as fractions, shown as %)
+  const [vramHighPct, setVramHighPct] = useState(85);
+  const [vramLowPct, setVramLowPct] = useState(60);
+  const [idleOffload, setIdleOffload] = useState('900');
+  const [bandwidthCeiling, setBandwidthCeiling] = useState('100');
   const [maxLoadedModels, setMaxLoadedModels] = useState('3');
   const [autoLoadOnRequest, setAutoLoadOnRequest] = useState(true);
+
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [restartRequired, setRestartRequired] = useState<string[]>([]);
 
   const { accentColor, setAccentColor, presets } = useAccentTheme();
   const { isDark, toggleTheme } = useTheme();
 
+  const applyConfig = useCallback((cfg: EngineConfig) => {
+    setConfig(cfg);
+    setVramHighPct(Math.round(cfg.vram_high_watermark * 100));
+    setVramLowPct(Math.round(cfg.vram_low_watermark * 100));
+    setIdleOffload(String(cfg.idle_offload_after_secs));
+    setBandwidthCeiling(String(cfg.bandwidth_ceiling_percent));
+    setMaxLoadedModels(String(cfg.max_loaded_models));
+    setAutoLoadOnRequest(cfg.auto_load_on_request);
+  }, []);
+
   useEffect(() => {
+    let mounted = true;
+    getConfig()
+      .then(cfg => {
+        if (mounted) applyConfig(cfg);
+      })
+      .catch(err => {
+        if (mounted) {
+          setLoadError(
+            err instanceof Error ? err.message : 'Cannot reach the Gabriel API at http://127.0.0.1:8080',
+          );
+        }
+      });
+    getHealth()
+      .then(h => {
+        if (mounted) setHealth(h);
+      })
+      .catch(() => {
+        if (mounted) setHealth(null);
+      });
     if (typeof navigator !== 'undefined') {
       const platform = navigator.platform || navigator.userAgent || '';
       setIsMac(/Mac|iPod|iPhone|iPad/.test(platform));
     }
-  }, []);
+    return () => {
+      mounted = false;
+    };
+  }, [applyConfig]);
+
+  const handleSave = async () => {
+    if (!config) return;
+    if (vramLowPct >= vramHighPct) {
+      setSaveError('VRAM low watermark must be below the high watermark.');
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      const next: EngineConfig = {
+        ...config,
+        vram_high_watermark: vramHighPct / 100,
+        vram_low_watermark: vramLowPct / 100,
+        idle_offload_after_secs: Number(idleOffload),
+        bandwidth_ceiling_percent: Number(bandwidthCeiling),
+        max_loaded_models: Number(maxLoadedModels),
+        auto_load_on_request: autoLoadOnRequest,
+      };
+      const res = await putConfig(next);
+      applyConfig(res.config);
+      setRestartRequired(res.restart_required);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const getSectionIcon = (id: SectionId) => {
     switch (id) {
-      case 'general':        return <SettingsIcon size={16} />;
-      case 'appearance':     return <Palette size={16} />;
-      case 'governor':       return <Sliders size={16} />;
-      case 'models-storage': return <HardDrive size={16} />;
-      case 'performance':    return <Cpu size={16} />;
-      case 'shortcuts':      return <Keyboard size={16} />;
+      case 'general':    return <SettingsIcon size={16} />;
+      case 'appearance': return <Info size={16} />;
+      case 'governor':   return <Sliders size={16} />;
+      case 'shortcuts':  return <Keyboard size={16} />;
     }
   };
+
+  const idleSelectOptions = idleOptions.some(o => o.value === idleOffload)
+    ? idleOptions
+    : [...idleOptions, { value: idleOffload, label: `${Math.round(Number(idleOffload) / 60)} minutes` }];
 
   const renderSectionContent = () => {
     switch (activeSection) {
       case 'general':
         return (
           <div className="space-y-1">
-            <SettingRow label="App Title">
-              <input
-                type="text"
-                className="w-48 glass-pill px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
-                defaultValue="Gabriel"
-              />
+            <SettingRow label="Backend API" description="Base URL used by this UI to reach the engine">
+              <span className="badge badge-gray font-mono text-[10px]">http://127.0.0.1:8080</span>
             </SettingRow>
 
-            <SettingRow label="Startup Route">
-              <Select
-                options={[
-                  { value: '/', label: 'Home' },
-                  { value: '/chat', label: 'Chat' },
-                  { value: '/image', label: 'Image' },
-                  { value: '/voice', label: 'Voice' },
-                  { value: '/models', label: 'Models' },
-                  { value: '/system', label: 'System' },
-                ]}
-                value={startupPage}
-                onChange={setStartupPage}
-                className="w-44"
-              />
+            <SettingRow label="Chat History" description="Sessions and messages are kept in this browser only">
+              <span className="badge badge-gray font-mono text-[10px]">localStorage</span>
             </SettingRow>
 
-            <SettingRow label="Launch on Startup" description="Start Gabriel on system login">
-              <Toggle defaultChecked />
+            <SettingRow label="Engine Version" description="Version reported by GET /health">
+              <span className="badge badge-gray font-mono text-[10px]">
+                {health ? `v${health.version}` : '—'}
+              </span>
             </SettingRow>
 
-            <SettingRow label="Local Auto Updates" description="Check for new engine binary releases">
-              <Toggle defaultChecked />
+            <SettingRow label="Config File" description="Persisted engine configuration on disk">
+              <span className="badge badge-gray font-mono text-[10px] truncate max-w-[200px]">
+                ~/.config/gabriel/config.json
+              </span>
             </SettingRow>
           </div>
         );
@@ -236,19 +299,6 @@ export const Settings: FC = () => {
                 })}
               </div>
             </SettingRow>
-
-            <SettingRow label="UI Density">
-              <Select
-                options={[
-                  { value: 'compact', label: 'Compact (12px)' },
-                  { value: 'medium', label: 'Medium (13px)' },
-                  { value: 'spacious', label: 'Spacious (14px)' },
-                ]}
-                value={fontDensity}
-                onChange={setFontDensity}
-                className="w-44"
-              />
-            </SettingRow>
           </div>
         );
 
@@ -258,12 +308,20 @@ export const Settings: FC = () => {
             <div className="p-3 rounded-2xl bg-[var(--color-primary-bg)] border border-primary/20 text-xs text-text-primary mb-3">
               <div className="font-bold flex items-center gap-1.5 text-primary">
                 <Sliders size={15} />
-                Engine Governor Tunables (`core::EngineConfig`)
+                Engine Governor Tunables (core::EngineConfig)
               </div>
               <p className="text-text-secondary text-[11px] mt-1">
-                Directly configures the Rust backend memory manager, offload paging triggers, and bandwidth governor ceilings.
+                Watermarks, idle offload, bandwidth ceiling and model limits are hot-applied by the Rust
+                engine and persisted to disk on save.
               </p>
             </div>
+
+            {loadError && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-[var(--color-hover)] text-xs text-danger font-semibold">
+                <AlertCircle size={14} className="shrink-0" />
+                <span className="truncate" title={loadError}>{loadError}</span>
+              </div>
+            )}
 
             <SettingRow label="VRAM High Watermark" description="Threshold percentage to trigger automatic model offloading">
               <div className="flex items-center gap-3">
@@ -271,12 +329,12 @@ export const Settings: FC = () => {
                   type="range"
                   min="50"
                   max="98"
-                  value={vramHighWatermark}
-                  onChange={(e) => setVramHighWatermark(Number(e.target.value))}
+                  value={vramHighPct}
+                  onChange={(e) => setVramHighPct(Number(e.target.value))}
                   className="w-28 accent-primary cursor-pointer"
                 />
                 <span className="badge badge-primary font-mono font-bold w-12 text-center">
-                  {vramHighWatermark}%
+                  {vramHighPct}%
                 </span>
               </div>
             </SettingRow>
@@ -287,41 +345,35 @@ export const Settings: FC = () => {
                   type="range"
                   min="30"
                   max="80"
-                  value={vramLowWatermark}
-                  onChange={(e) => setVramLowWatermark(Number(e.target.value))}
+                  value={vramLowPct}
+                  onChange={(e) => setVramLowPct(Number(e.target.value))}
                   className="w-28 accent-primary cursor-pointer"
                 />
                 <span className="badge badge-secondary font-mono font-bold w-12 text-center">
-                  {vramLowWatermark}%
+                  {vramLowPct}%
                 </span>
               </div>
             </SettingRow>
 
             <SettingRow label="Idle Offload Timeout" description="Inactivity duration before paging model to System RAM">
               <Select
-                options={[
-                  { value: '5', label: '5 minutes' },
-                  { value: '15', label: '15 minutes' },
-                  { value: '30', label: '30 minutes' },
-                  { value: '60', label: '1 hour' },
-                  { value: 'never', label: 'Never Offload' },
-                ]}
-                value={idleOffloadTimeout}
-                onChange={setIdleOffloadTimeout}
+                options={idleSelectOptions}
+                value={idleOffload}
+                onChange={setIdleOffload}
                 className="w-40"
               />
             </SettingRow>
 
-            <SettingRow label="Bandwidth Ceiling" description="Maximum memory bus transfer rate limit (GB/s)">
+            <SettingRow label="Bandwidth Ceiling" description="Maximum memory bus utilization the governor will allow">
               <div className="flex items-center gap-2">
                 <NumberStepper
                   value={bandwidthCeiling}
                   onChange={setBandwidthCeiling}
-                  min={1}
-                  max={128}
+                  min={10}
+                  max={100}
                   ariaLabel="Bandwidth ceiling"
                 />
-                <span className="text-xs font-mono text-text-secondary font-semibold">GB/s</span>
+                <span className="text-xs font-mono text-text-secondary font-semibold">% of bus</span>
               </div>
             </SettingRow>
 
@@ -338,55 +390,37 @@ export const Settings: FC = () => {
             <SettingRow label="Auto-load on Request" description="Automatically page model into VRAM when prompted">
               <Toggle checked={autoLoadOnRequest} onChange={setAutoLoadOnRequest} />
             </SettingRow>
-          </div>
-        );
 
-      case 'models-storage':
-        return (
-          <div className="space-y-1">
-            <SettingRow label="Models Directory" description="Local directory on disk for weights and safetensors">
-              <div className="flex items-center gap-2">
-                <span className="badge badge-gray font-mono text-[10px] tracking-tight truncate max-w-[160px]">
-                  ~/Gabriel/Models
+            {/* Save */}
+            <div className="pt-4 flex flex-wrap items-center gap-3">
+              <button
+                onClick={handleSave}
+                disabled={!config || saving}
+                className="btn-primary py-2 px-5 text-xs font-bold cursor-pointer flex items-center gap-2 disabled:opacity-50"
+              >
+                {saving && <Loader2 size={14} className="animate-spin" />}
+                Save Changes
+              </button>
+              {saved && !saveError && (
+                <span className="text-xs font-semibold text-secondary flex items-center gap-1.5">
+                  <Check size={14} />
+                  Saved &amp; applied
                 </span>
-                <button className="btn-secondary py-1 px-3 text-xs font-semibold shrink-0 cursor-pointer">Browse</button>
+              )}
+              {saveError && (
+                <span className="text-xs font-semibold text-danger flex items-center gap-1.5 truncate" title={saveError}>
+                  <AlertCircle size={14} className="shrink-0" />
+                  {saveError}
+                </span>
+              )}
+            </div>
+            {restartRequired.length > 0 && (
+              <div className="p-3 rounded-xl bg-[var(--color-hover)] border border-[var(--color-border)] text-[11px] text-text-secondary">
+                <span className="font-bold text-text-primary">Restart required for:</span>{' '}
+                <span className="font-mono">{restartRequired.join(', ')}</span> — these changes are saved and
+                will take effect the next time the engine starts.
               </div>
-            </SettingRow>
-
-            <SettingRow label="Disk Cache Limit" description="Maximum disk space allocated for model caches">
-              <div className="flex items-center gap-2.5">
-                <input
-                  type="range"
-                  min="10"
-                  max="500"
-                  defaultValue="100"
-                  className="w-28 h-1.5 bg-border rounded-lg appearance-none accent-primary cursor-pointer"
-                />
-                <span className="badge badge-primary font-mono font-bold">100 GB</span>
-              </div>
-            </SettingRow>
-          </div>
-        );
-
-      case 'performance':
-        return (
-          <div className="space-y-1">
-            <SettingRow label="Engine Performance Mode">
-              <Select
-                options={[
-                  { value: 'balanced', label: 'Balanced' },
-                  { value: 'performance', label: 'Performance' },
-                  { value: 'efficiency', label: 'Efficiency' },
-                ]}
-                value={enginePerfMode}
-                onChange={setEnginePerfMode}
-                className="w-44"
-              />
-            </SettingRow>
-
-            <SettingRow label="CUDA High Priority Streams" description="Use priority CUDA streams for real-time inference">
-              <Toggle defaultChecked />
-            </SettingRow>
+            )}
           </div>
         );
 
@@ -412,6 +446,9 @@ export const Settings: FC = () => {
           <SettingsIcon className="text-primary" size={20} />
           <h1 className="font-bold text-lg text-text-primary">Engine & Application Settings</h1>
         </div>
+        <span className={`text-xs font-bold flex items-center gap-1.5 ${health ? 'text-secondary' : 'text-danger'}`}>
+          {health ? `Engine v${health.version} · ${health.api}` : 'Backend unreachable'}
+        </span>
       </div>
 
       {/* Main Workspace */}
@@ -454,48 +491,41 @@ export const Settings: FC = () => {
               </div>
               <div className="flex justify-between py-1 border-b border-[var(--color-border)]">
                 <span>Version</span>
-                <span className="font-mono font-bold text-text-primary">1.2.3-native</span>
+                <span className="font-mono font-bold text-text-primary">
+                  {health ? `v${health.version}` : '—'}
+                </span>
               </div>
               <div className="flex justify-between py-1 border-b border-[var(--color-border)]">
-                <span>Architecture</span>
-                <span className="font-semibold text-primary">Zero-Crash Local</span>
+                <span>API</span>
+                <span className="font-mono font-semibold text-primary">{health ? health.api : '—'}</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-[var(--color-border)]">
+                <span>Uptime</span>
+                <span className="font-mono font-bold text-text-primary">
+                  {health ? `${Math.floor(health.uptime_secs / 60)} min` : '—'}
+                </span>
               </div>
               <div className="flex justify-between py-1">
                 <span>Telemetry</span>
                 <span className="text-text-primary font-semibold">Local Only</span>
               </div>
             </div>
-            <button className="btn-secondary w-full py-1.5 mt-2 flex items-center justify-center gap-1.5 text-xs font-semibold cursor-pointer">
-              <RotateCcw size={14} />
-              Verify Engine Binary
-            </button>
           </div>
 
-          {/* Maintenance Actions */}
+          {/* Live snapshot */}
           <div className="pt-3 border-t border-[var(--color-border)] space-y-2">
-            <div className="font-bold text-text-primary">Maintenance & Reset</div>
-            <div className="space-y-2">
-              <button className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[var(--color-hover)] border border-[var(--color-border)] transition-colors text-left group cursor-pointer">
-                <div className="flex items-center gap-2">
-                  <div className="p-1.5 rounded-lg bg-[var(--color-hover)] text-text-secondary"><Trash2 size={14} /></div>
-                  <div>
-                    <div className="font-semibold text-[11px] text-text-primary">Reset Settings</div>
-                    <div className="text-[9px] text-text-secondary">Restore factory defaults</div>
-                  </div>
+            <div className="font-bold text-text-primary">Live Engine Snapshot</div>
+            <div className="space-y-1.5">
+              {[
+                { name: 'Loaded models', value: health ? String(health.loaded_models) : '—' },
+                { name: 'Active jobs', value: health ? String(health.active_jobs) : '—' },
+                { name: 'Config source', value: 'disk + hot-apply' },
+              ].map(item => (
+                <div key={item.name} className="flex items-center justify-between p-2 rounded-xl bg-[var(--color-hover)]">
+                  <span className="text-text-primary font-semibold text-[11px]">{item.name}</span>
+                  <span className="font-mono font-bold text-[10px] text-text-secondary">{item.value}</span>
                 </div>
-                <ChevronRight size={14} className="text-text-secondary" />
-              </button>
-
-              <button className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[var(--color-hover)] border border-[var(--color-border)] transition-colors text-left group cursor-pointer">
-                <div className="flex items-center gap-2">
-                  <div className="p-1.5 rounded-lg bg-[var(--color-hover)] text-text-secondary"><Database size={14} /></div>
-                  <div>
-                    <div className="font-semibold text-[11px] text-text-primary">Clear Model Caches</div>
-                    <div className="text-[9px] text-text-secondary">Remove cached tensors</div>
-                  </div>
-                </div>
-                <ChevronRight size={14} className="text-text-secondary" />
-              </button>
+              ))}
             </div>
           </div>
         </div>

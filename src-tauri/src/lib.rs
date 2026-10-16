@@ -7,6 +7,7 @@ pub mod telemetry;
 pub mod types;
 
 use core::engine::EngineState;
+use tauri::Manager;
 
 #[cfg(debug_assertions)]
 fn init_tracing() {
@@ -32,11 +33,14 @@ fn init_tracing() {
 pub fn run() {
     init_tracing();
 
-    let engine = EngineState::new(core::EngineConfig::default());
-
     tauri::Builder::default()
-        .manage(engine.clone())
-        .setup(move |_app| {
+        .setup(|app| {
+            // EngineState::new spawns Tokio tasks, so block_on Tauri's
+            // runtime to provide a reactor context (setup itself is sync).
+            let engine = tauri::async_runtime::block_on(async {
+                EngineState::new(core::EngineConfig::load())
+            });
+            app.manage(engine.clone());
             let engine = engine.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = api::serve(engine).await {
@@ -51,6 +55,7 @@ pub fn run() {
             ipc::commands::offload_model,
             ipc::commands::get_telemetry,
             ipc::commands::list_loaded_models,
+            ipc::commands::list_models_in_use,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Gabriel");

@@ -69,7 +69,7 @@ export const RadialGraph: FC<RadialGraphProps> = ({
 
         {showCenterText && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
-            <span className="font-mono font-bold text-base md:text-lg tracking-tight text-text-primary">
+            <span className="font-mono font-bold text-[10px] tracking-tight text-text-primar">
               {Math.round(safePercent)}%
             </span>
             {sublabel && (

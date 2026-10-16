@@ -97,12 +97,21 @@ pub struct ModelRuntimeInfo {
     pub residency: Residency,
     pub vram_bytes: u64,
     pub idle_secs: u64,
+    /// Number of jobs currently executing against this model.
+    /// `> 0` means the model is actively in use (streaming / generating).
+    pub active_jobs: usize,
+    /// Convenience flag derived from `active_jobs > 0` for easy inference
+    /// of the current model in use (e.g. via `GET /v1/models`).
+    pub in_use: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetrySnapshot {
     pub gpu_name: String,
     pub gpu_util_percent: f32,
+    pub gpu_temperature_c: u32,
+    pub gpu_power_w: f32,
+    pub gpu_driver_version: String,
     pub vram_total_bytes: u64,
     pub vram_used_bytes: u64,
     pub vram_high_watermark: f64,

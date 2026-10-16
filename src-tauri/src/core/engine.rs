@@ -17,6 +17,7 @@ use crate::types::{
 
 use super::EngineConfig;
 use super::bandwidth::{BandwidthGovernor, GovernorConfig};
+use super::events::EventLog;
 use super::pager::{MemoryPager, PagerConfig};
 use super::registry::Registry;
 use super::scheduler::{Scheduler, dispatch};
@@ -74,13 +75,17 @@ impl Drop for JobGuard {
 // =========================================================================
 
 pub struct EngineInner {
-    pub config: EngineConfig,
+    pub config: RwLock<EngineConfig>,
     pub registry: Arc<RwLock<Registry>>,
     pub telemetry: Arc<Telemetry>,
     pub pager: Arc<MemoryPager>,
     pub governor: Arc<BandwidthGovernor>,
     pub scheduler: Scheduler,
     pub factory: BackendFactory,
+    /// Engine lifecycle events surfaced to the UI via `GET /v1/system/events`.
+    pub events: Arc<EventLog>,
+    /// When the engine started, for uptime reporting.
+    pub started_at: Instant,
     image_permits: Arc<Semaphore>,
     active_jobs: AtomicUsize,
     load_gate: tokio::sync::Mutex<()>,
@@ -129,6 +134,7 @@ impl EngineInner {
             }
             Err(e) => {
                 tracing::error!(model = %real_id, error = %e, "chat stream failed");
+                self.events.record("error", "chat", format!("chat stream failed on {real_id}: {e}"));
                 let _ = events.send(ChatEvent::Failed(e.to_string())).await;
             }
         }
@@ -141,7 +147,13 @@ impl EngineInner {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>> {
-        tracing::info!("engine: run_image called model={} prompt_len={} size={}x{}", model_id, prompt.len(), width, height);
+        tracing::info!(
+            "engine: run_image called model={} prompt_len={} size={}x{}",
+            model_id,
+            prompt.len(),
+            width,
+            height
+        );
         let (real_id, handle) = {
             let reg = self.registry.read();
             match reg.find_matching(model_id, ModelType::Image) {
@@ -246,11 +258,13 @@ impl EngineState {
             image_permits: Arc::new(Semaphore::new(config.max_concurrent_image_jobs)),
             active_jobs: AtomicUsize::new(0),
             load_gate: tokio::sync::Mutex::new(()),
-            config: config.clone(),
+            config: RwLock::new(config.clone()),
             registry: registry.clone(),
             telemetry: telemetry.clone(),
             pager: pager.clone(),
             governor: governor.clone(),
+            events: Arc::new(EventLog::new()),
+            started_at: Instant::now(),
             scheduler,
             factory: BackendFactory::new(governor.clone()),
         });
@@ -320,7 +334,10 @@ impl EngineState {
                 tracing::info!("engine: executing image job, acquiring semaphore");
                 let _permit = self.inner().image_permits.acquire().await;
                 tracing::info!("engine: semaphore acquired, ensuring ready");
-                eprintln!("DEBUG execute: job_id={} reply={:p}", job.id, &reply as *const _);
+                eprintln!(
+                    "DEBUG execute: job_id={} reply={:p}",
+                    job.id, &reply as *const _
+                );
                 let result = match self.ensure_ready(&job.model_id, ModelType::Image).await {
                     Ok(real_id) => {
                         self.inner()
@@ -364,10 +381,6 @@ impl EngineState {
         &self.0
     }
 
-    pub(crate) fn inner_arc(&self) -> Arc<EngineInner> {
-        self.0.clone()
-    }
-
     pub fn governor(&self) -> Arc<BandwidthGovernor> {
         self.0.governor.clone()
     }
@@ -384,7 +397,7 @@ impl EngineState {
             return Err(GabrielError::AlreadyLoaded(model_id.to_string()));
         }
 
-        let slot_limit = self.inner().config.max_loaded_models;
+        let slot_limit = self.inner().config.read().max_loaded_models;
 
         let mut attempts = 0;
         while self.inner().registry.read().len() >= slot_limit {
@@ -393,9 +406,10 @@ impl EngineState {
                 return Err(GabrielError::SlotPoolExhausted { limit: slot_limit });
             }
 
+            let idle_offload_after = self.inner().config.read().idle_offload_after;
             let victim = {
                 let reg = self.inner().registry.read();
-                reg.least_recently_used_any_idle(self.inner().config.idle_offload_after)
+                reg.least_recently_used_any_idle(idle_offload_after)
             };
 
             let Some(victim_id) = victim else {
@@ -452,6 +466,11 @@ impl EngineState {
             ?model_type,
             "model resident on GPU"
         );
+        self.inner().events.record(
+            "info",
+            "model",
+            format!("loaded {model_id} onto GPU ({} MB)", final_spec.vram_bytes / 1_000_000),
+        );
 
         Ok(ModelStatus {
             model_id: model_id.to_string(),
@@ -478,6 +497,9 @@ impl EngineState {
             self.inner().registry.write().demote(model_id);
             self.inner().pager.on_demoted_or_unloaded(spec.vram_bytes);
             tracing::info!(model = %model_id, "model offloaded VRAM -> RAM by request");
+            self.inner()
+                .events
+                .record("info", "model", format!("offloaded {model_id} VRAM -> RAM"));
         }
 
         Ok(ModelStatus {
@@ -507,6 +529,9 @@ impl EngineState {
         }
 
         tracing::info!(model = %model_id, "model unloaded");
+        self.inner()
+            .events
+            .record("info", "model", format!("unloaded {model_id}"));
         Ok(ModelStatus {
             model_id: model_id.to_string(),
             model_type: entry.0.model_type,
@@ -537,7 +562,7 @@ impl EngineState {
             }
         }
 
-        if !self.inner().config.auto_load_on_request {
+        if !self.inner().config.read().auto_load_on_request {
             return Err(GabrielError::ModelNotLoaded(model_id.to_string()));
         }
 
@@ -580,7 +605,11 @@ impl EngineState {
         width: u32,
         height: u32,
     ) -> Result<oneshot::Receiver<std::result::Result<Vec<u8>, GabrielError>>> {
-        tracing::info!("engine: submit_image model={} prompt_len={}", model_id, prompt.len());
+        tracing::info!(
+            "engine: submit_image model={} prompt_len={}",
+            model_id,
+            prompt.len()
+        );
         let model_id = self.ensure_ready(model_id, ModelType::Image).await?;
         tracing::info!("engine: ensure_ready passed model={}", model_id);
 
@@ -616,7 +645,8 @@ impl EngineState {
         let vram_limit = if snap.vram_total_bytes == 0 {
             usize::MAX
         } else {
-            (snap.vram_total_bytes as f64 * self.config().vram_high_watermark) as usize
+            let high_watermark = self.inner().config.read().vram_high_watermark;
+            (snap.vram_total_bytes as f64 * high_watermark) as usize
         };
         let available_vram_budget = vram_limit.saturating_sub(snap.engine_resident_bytes as usize);
 
@@ -693,14 +723,26 @@ impl EngineState {
             .scheduler
             .submit(job)
             .await
-            .map_err(|j| GabrielError::QueueRejected {
-                job_id: j.id.to_string(),
-                reason: "queue saturated".into(),
+            .map_err(|j| {
+                self.inner().events.record(
+                    "error",
+                    "scheduler",
+                    format!("queue rejected job {} (queue saturated)", j.id),
+                );
+                GabrielError::QueueRejected {
+                    job_id: j.id.to_string(),
+                    reason: "queue saturated".into(),
+                }
             })
     }
 
     pub fn list_models(&self) -> Vec<ModelRuntimeInfo> {
         self.inner().registry.read().snapshot()
+    }
+
+    /// Models with at least one active job — i.e. currently in use.
+    pub fn list_models_in_use(&self) -> Vec<ModelRuntimeInfo> {
+        self.inner().registry.read().snapshot_in_use()
     }
 
     pub fn telemetry_snapshot(&self) -> TelemetrySnapshot {
@@ -710,13 +752,17 @@ impl EngineState {
         let (memory_bus_percent, bandwidth_pressure) = self.inner().governor.snapshot();
 
         let vram_snap = self.inner().pager.vram_snapshot();
+        let vram_high_watermark = self.inner().config.read().vram_high_watermark;
 
         TelemetrySnapshot {
             gpu_name: gpu.name,
             gpu_util_percent: gpu.utilization_percent,
+            gpu_temperature_c: gpu.temperature_c,
+            gpu_power_w: gpu.power_w,
+            gpu_driver_version: gpu.driver_version,
             vram_total_bytes: gpu.total_bytes,
             vram_used_bytes: gpu.used_bytes,
-            vram_high_watermark: self.inner().config.vram_high_watermark,
+            vram_high_watermark,
             engine_resident_bytes: vram_snap.engine_tracked_bytes,
             vram_untracked_bytes: vram_snap.untracked_bytes,
             vram_peak_untracked_bytes: self.inner().pager.peak_untracked_bytes(),
@@ -729,7 +775,48 @@ impl EngineState {
         }
     }
 
-    pub fn config(&self) -> &EngineConfig {
-        &self.inner().config
+    pub fn config(&self) -> EngineConfig {
+        self.inner().config.read().clone()
+    }
+
+    /// Hot-apply a new engine config: live fields take effect immediately
+    /// (max_loaded_models, auto_load_on_request, watermarks, governor),
+    /// construction-time fields (host/port/queue/...) are picked up on restart.
+    pub fn update_config(&self, new: EngineConfig) {
+        {
+            let mut cfg = self.inner().config.write();
+            *cfg = new.clone();
+        }
+        self.inner().pager.update_watermarks(
+            new.vram_high_watermark,
+            new.vram_low_watermark,
+            new.idle_offload_after,
+        );
+        self.inner().governor.update_config(GovernorConfig {
+            ceiling_percent: new.bandwidth_ceiling_percent,
+            max_yield: new.max_bandwidth_yield,
+        });
+        self.inner().events.record(
+            "info",
+            "config",
+            format!(
+                "config updated (max_loaded_models={}, auto_load_on_request={}, high_watermark={:.2})",
+                new.max_loaded_models, new.auto_load_on_request, new.vram_high_watermark
+            ),
+        );
+    }
+
+    /// Engine lifecycle event log backing `GET /v1/system/events`.
+    pub fn events(&self) -> Arc<EventLog> {
+        self.inner().events.clone()
+    }
+
+    /// Jobs currently executing.
+    pub fn active_jobs(&self) -> usize {
+        self.inner().active_jobs.load(Ordering::Relaxed)
+    }
+
+    pub fn uptime_secs(&self) -> u64 {
+        self.inner().started_at.elapsed().as_secs()
     }
 }

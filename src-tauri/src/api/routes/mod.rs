@@ -1,5 +1,9 @@
 pub mod chat;
+pub mod config;
 pub mod health;
 pub mod images;
 pub mod models_list;
+pub mod models_manage;
 pub mod speech;
+pub mod system;
+pub mod telemetry;

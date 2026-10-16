@@ -130,7 +130,7 @@ impl CandleTextBackend {
             }
         })?;
         let tensor_count = content.tensor_infos.len();
-        let mut model = ModelWeights::from_gguf(content, &mut file, &device).map_err(|e| {
+        let model = ModelWeights::from_gguf(content, &mut file, &device).map_err(|e| {
             tracing::error!("weight build failed: {e}");
             GabrielError::WeightLoadFailed {
                 model_id: model_id.clone(),

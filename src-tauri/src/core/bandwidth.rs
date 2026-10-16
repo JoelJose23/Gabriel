@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use parking_lot::RwLock;
+
 #[derive(Debug, Clone)]
 pub struct GovernorConfig {
     pub ceiling_percent: f64,
@@ -21,8 +23,7 @@ impl Default for GovernorConfig {
 /// Lock-free implementation utilizing atomic bit patterns for `f64`.
 #[derive(Debug)]
 pub struct BandwidthGovernor {
-    ceiling_percent: f64,
-    max_yield: Duration,
+    config: RwLock<GovernorConfig>,
     ema_bits: AtomicU64,
 }
 
@@ -30,12 +31,20 @@ const EMA_ALPHA: f64 = 0.35;
 
 impl BandwidthGovernor {
     pub fn new(config: GovernorConfig) -> Self {
-        let ceiling = config.ceiling_percent.clamp(10.0, 100.0);
         Self {
-            ceiling_percent: ceiling,
-            max_yield: config.max_yield,
+            config: RwLock::new(GovernorConfig {
+                ceiling_percent: config.ceiling_percent.clamp(10.0, 100.0),
+                max_yield: config.max_yield,
+            }),
             ema_bits: AtomicU64::new(0.0f64.to_bits()),
         }
+    }
+
+    /// Hot-apply ceiling / yield changes from `PUT /v1/config`.
+    pub fn update_config(&self, config: GovernorConfig) {
+        let mut cfg = self.config.write();
+        cfg.ceiling_percent = config.ceiling_percent.clamp(10.0, 100.0);
+        cfg.max_yield = config.max_yield;
     }
 
     pub fn update(&self, memory_bus_percent: f32) {
@@ -66,27 +75,36 @@ impl BandwidthGovernor {
 
     /// Normalized overload above the ceiling: 0 at/below ceiling, 1 at 100%.
     pub fn pressure(&self) -> f64 {
+        let ceiling = self.config.read().ceiling_percent;
+        self.pressure_at(ceiling)
+    }
+
+    fn pressure_at(&self, ceiling_percent: f64) -> f64 {
         let util = self.bus_utilization();
-        if util <= self.ceiling_percent {
+        if util <= ceiling_percent {
             return 0.0;
         }
 
-        let headroom_span = 100.0 - self.ceiling_percent;
+        let headroom_span = 100.0 - ceiling_percent;
         if headroom_span <= f64::EPSILON {
             return 1.0;
         }
 
-        let p = (util - self.ceiling_percent) / headroom_span;
+        let p = (util - ceiling_percent) / headroom_span;
         if p.is_nan() { 0.0 } else { p.clamp(0.0, 1.0) }
     }
 
     /// How long a standard-lane job should pause before its next compute step.
     pub fn standard_yield(&self) -> Duration {
-        let p = self.pressure();
+        let (ceiling_percent, max_yield) = {
+            let cfg = self.config.read();
+            (cfg.ceiling_percent, cfg.max_yield)
+        };
+        let p = self.pressure_at(ceiling_percent);
         if p <= f64::EPSILON || p.is_nan() {
             return Duration::ZERO;
         }
-        self.max_yield.mul_f64(p)
+        max_yield.mul_f64(p)
     }
 
     pub fn snapshot(&self) -> (f64, f64) {

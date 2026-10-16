@@ -2,7 +2,7 @@
 
 Gabriel is a native, zero-crash, multimodal **local AI desktop application** and **inference engine** written in Rust. It serves as a desktop app powered by a React + Tauri v2 frontend ("Aurora Glass" UI) and a bare-metal Rust core running on Hugging Face Candle. Gabriel provides OpenAI-compatible inference entirely on your local machine with zero telemetry, zero cloud dependencies, and a hardware-aware resource governor that structurally prevents CUDA out-of-memory (OOM) crashes.
 
-It runs both as a desktop app and as a headless server exposing standard OpenAI REST endpoints (`/v1/chat/completions`, `/v1/images/generations`, `/v1/audio/speech`), allowing any OpenAI SDK, LangChain pipeline, or `curl` script to drive it.
+It runs both as a desktop app and as a headless server exposing standard OpenAI REST endpoints (`/v1/chat/completions`, `/v1/images/generations`, `/v1/audio/speech`), allowing any OpenAI SDK, LangChain pipeline, or `curl` script to drive it. Beyond the OpenAI surface, a management API (`/v1/models/*`, `/v1/telemetry`, `/v1/config`, `/v1/system/*`) lets the UI — or any HTTP client — load/offload models, read live telemetry, hot-edit the engine governor, and tail engine events. The frontend consumes this API directly (`src/api/`), so the same UI runs identically in the Tauri webview and in a plain browser, with CORS restricted to the known frontend origins.
 
 ---
 
@@ -16,6 +16,15 @@ The frontend is built with a bespoke **"Aurora Glass"** design system inspired b
 * **True Dual Themes:**
 * *Light Mode:* Translucent off-white glass with gray borders and soft pastel aurora accents.
 * *Dark Mode:* Deep charcoal base (`#0a0a0a`), vibrant accent colors, and dark glass surfaces.
+
+### Live-Engine Wiring
+
+* Every page (**Chat, Home, Models, Image, Voice, Settings, System**) talks to the real engine through the typed client in `src/api/` — mock data was retired.
+* **Chat** streams completions from `POST /v1/chat/completions` and persists sessions to `localStorage` (`src/lib/sessions.ts`, newest-first, capped at 100).
+* **Models** loads/offloads/unloads models via the lifecycle endpoints, including load-by-ID for custom weights.
+* **Settings** reads and hot-applies governor config via `GET`/`PUT /v1/config`.
+* **System** polls `GET /v1/telemetry` (`useTelemetry`, 1.5–2 s cadence), `GET /health`, `GET /v1/system/processes`, and tails `GET /v1/system/events` for a live activity feed.
+* The legacy `RightPanel` layout component was removed in favor of the full-width page surfaces.
 
 
 
@@ -57,9 +66,16 @@ The frontend is built with a bespoke **"Aurora Glass"** design system inspired b
 | **Slot Pool & Pins** | Count-based `max_loaded_models` cap with deterministic LRU eviction. Models with in-flight jobs are pinned via `JobGuard` RAII and skipped during eviction sweeps.
 
  |
-| **Live Telemetry & IPC** | Real-time monitoring of CPU, GPU, RAM, VRAM budget ledgers, and per-model idle times via NVML/sysinfo and strongly typed Tauri IPC commands.
+| **Live Telemetry & IPC** | Real-time monitoring of CPU, GPU, RAM, VRAM budget ledgers, and per-model idle times via NVML/sysinfo and strongly typed Tauri IPC commands. GPU samples now include **temperature, power draw, and driver version**; `GET /v1/telemetry` mirrors the `get_telemetry` IPC command over HTTP. |
 
- |
+| **Model Lifecycle API** | `POST /v1/models/load`, `/v1/models/offload`, `/v1/models/unload` drive residency from anywhere; `GET /v1/models/in_use` (and the `active_jobs` / `in_use` fields on every model) report which models are serving jobs right now. |
+
+| **Hot-Applicable Config API** | `GET`/`PUT /v1/config` validates, hot-applies, and persists governor settings to disk, reporting construction-time fields (host, port, queue capacity, …) in `restart_required`. |
+
+| **Engine Event Log** | A 500-entry ring buffer (`core/events.rs`) records model loads/offloads, scheduler rejections, and stream failures; `GET /v1/system/events?after=<seq>` tails it incrementally for the UI activity feed. |
+
+| **CORS-Sandboxed HTTP** | The Axum server grants browser access only to the known frontend origins (`localhost:5173/4173`, `tauri://localhost`), keeping the engine bound to `127.0.0.1`. |
+
 
 ---
 
@@ -123,8 +139,12 @@ React UI (Tauri WebView / Aurora Glass)
 │  api/  axum @ 127.0.0.1:8080 ────────┘                                │
 │  /v1/chat/completions (SSE)  /v1/images/generations                   │
 │  /v1/audio/speech            /v1/models       /health                 │
+│  /v1/models/{in_use,load,offload,unload}   /v1/telemetry              │
+│  /v1/config (GET/PUT)        /v1/system/{processes,events}            │
 └───────────────────────────────────────────────────────────────────────┘
 ```[cite: 1]
+
+The React frontend talks to this server through a typed client (`src/api/`), polling telemetry (`useTelemetry`) and health, tailing engine events, and streaming chat completions — mock data was replaced with live engine responses across every page.
 
 ### Module Map
 
@@ -143,6 +163,7 @@ src-tauri/src/
 │   ├── scheduler.rs     Two-lane mpsc queues + dispatcher (tokio::select! biased)
 │   ├── pager.rs         MemoryPager: admit(), maintenance pass, VRAM ledger
 │   ├── bandwidth.rs     BandwidthGovernor: EMA of NVML memory-controller utilization
+│   ├── events.rs         EventLog: 500-entry ring buffer of engine lifecycle events
 │   └── registry.rs      Model residency table with LRU tracking + active_jobs pins
 ├── inference/
 │   ├── mod.rs           Backend traits + BackendFactory
@@ -152,12 +173,24 @@ src-tauri/src/
 │   ├── tts_kokoro.rs    KokoroSpeechBackend (native kokoro-tiny, 24 kHz WAV)
 │   └── stub.rs          Deterministic stub engines used by tests/dev
 ├── api/
-│   ├── router.rs        Axum routing table
-│   └── routes/          chat.rs (SSE) · images.rs · speech.rs · models_list.rs · health.rs
+│   ├── router.rs        Axum routing table + CORS layer (frontend origins only)
+│   └── routes/          chat.rs (SSE) · images.rs · speech.rs · models_list.rs
+│                        models_manage.rs (load/offload/unload) · health.rs
+│                        config.rs (GET/PUT, validated + persisted)
+│                        telemetry.rs (HTTP mirror of the IPC snapshot)
+│                        system.rs (processes + event tail)
 ├── telemetry/
-│   ├── gpu.rs           NVML / Metal / fallback monitors
+│   ├── gpu.rs           NVML / Metal / fallback monitors (temp, power, driver)
 │   └── sys.rs           sysinfo-based RAM/CPU sampler
-└── ipc/commands.rs      #[tauri::command] handlers
+└── ipc/commands.rs      #[tauri::command] handlers (incl. list_models_in_use)
+
+src/
+├── api/                 Typed HTTP client for the engine (client.ts + endpoint wrappers)
+├── types/               api.ts · telemetry.ts — shared request/response types
+├── hooks/               useTelemetry (polls /v1/telemetry) · useTheme · useGlobalShortcuts
+├── lib/sessions.ts      Chat session persistence (localStorage, newest-first)
+├── pages/               Chat · Home · Image · Models · Settings · System · Voice
+└── components/          Aurora Glass layout (Sidebar, SystemMonitor, …)
 
 ```[cite: 1]
 
@@ -195,7 +228,34 @@ curl http://127.0.0.1:8080/v1/audio/speech \
 
 # Model Registry Telemetry
 curl http://127.0.0.1:8080/v1/models
+
+# Live Telemetry Snapshot (GPU temp/power/driver, VRAM, CPU, RAM)
+curl http://127.0.0.1:8080/v1/telemetry
+
+# Models currently serving jobs (active_jobs > 0)
+curl http://127.0.0.1:8080/v1/models/in_use
+
+# Model lifecycle: load / offload / unload
+curl http://127.0.0.1:8080/v1/models/load \
+  -H 'Content-Type: application/json' \
+  -d '{"model_id":"qwen2.5-3b-instruct","model_type":"text"}'
+curl -X POST http://127.0.0.1:8080/v1/models/offload \
+  -H 'Content-Type: application/json' -d '{"model_id":"qwen2.5-3b-instruct"}'
+curl -X POST http://127.0.0.1:8080/v1/models/unload \
+  -H 'Content-Type: application/json' -d '{"model_id":"qwen2.5-3b-instruct"}'
+
+# Engine governor config — read and hot-apply (validated + persisted to disk)
+curl http://127.0.0.1:8080/v1/config
+curl -X PUT http://127.0.0.1:8080/v1/config \
+  -H 'Content-Type: application/json' \
+  -d '{"vram_high_watermark":0.85,"max_loaded_models":4}'
+
+# System: running processes + incremental engine event tail
+curl http://127.0.0.1:8080/v1/system/processes
+curl 'http://127.0.0.1:8080/v1/system/events?after=0'
 ```[cite: 1]
+
+`PUT /v1/config` responds with the applied config plus a `restart_required` array listing construction-time fields (`host`, `port`, `queue_capacity`, `pager_poll_interval`, `max_concurrent_image_jobs`); everything else — watermarks, residency cap, idle offload timeout, bandwidth ceiling/yield — hot-applies immediately.
 
 ---
 
@@ -220,12 +280,15 @@ EngineConfig {
 }
 ```[cite: 1]
 
+**Persistence & hot-apply:** Config is no longer compile-time only. `EngineConfig::load()` reads `~/.config/gabriel/config.json` on startup (falling back to defaults when missing or malformed), and `EngineConfig::save()` writes it back after every accepted change. The Settings page edits this live through `GET`/`PUT /v1/config`, which runs `EngineConfigDto::validate()` (watermark ordering, port ranges, bandwidth ceiling bounds, …) before applying. Governor knobs — watermarks, residency cap, idle offload timeout, bandwidth ceiling/yield, auto-load — hot-apply to the running engine; binding/queue/poller fields are reported as `restart_required`.
+
 ---
 
 ## 🚀 Building & Running
 
 ### Prerequisites
-- **Node.js** (v18+) & **pnpm** (for desktop UI)
+- **Bun** (v1.1+) — frontend package manager & scripts (`pnpm`/npm also work for plain Vite, but lockfile and Tauri hooks assume Bun)
+- **Node.js** runtime compatibility (v18+) for Vite
 - **Rust 1.85+** (`rustup update stable`)[cite: 1]
 - **Tauri v2 Dependencies:**
   - *Linux:* `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`[cite: 1]
@@ -247,12 +310,18 @@ EngineConfig {
 
 ```bash
 # Install frontend dependencies
-pnpm install
+bun install
+
+# Frontend-only dev server (Vite @ http://localhost:5173)
+bun run dev
+
+# Launch full desktop shell (React + Tauri; runs `bun run dev` first)
+bun run tauri dev
 
 # Fast type-check of backend workspace
 cargo check[cite: 1]
 
-# Launch full desktop shell (React + Tauri)
+# Launch full desktop shell via Cargo (same effect as `bun run tauri dev`)
 cargo tauri dev[cite: 1]
 
 # Run standalone backend server with deterministic stubs (No GPU needed)
@@ -272,6 +341,8 @@ cargo build --release[cite: 1]
 
 ```
 
+The UI reaches the engine at `http://127.0.0.1:8080` by default; set `VITE_GABRIEL_API` to point the frontend elsewhere. `tauri.conf.json` wires `beforeDevCommand`/`beforeBuildCommand` to Bun and the dev server to `http://localhost:5173`.
+
 ---
 
 ## 🧪 Testing Suite
@@ -280,7 +351,7 @@ The testing suite verifies engine stability across multiple specialized isolatio
 
 | Suite | File | Coverage |
 | --- | --- | --- |
-| **Functionality** | `tests/api_test.rs` | SSE streaming, buffered chat, base64 image PNGs, WAV output, model registry
+| **Functionality** | `tests/api_test.rs` | SSE streaming, buffered chat, base64 image PNGs, WAV output, model registry, model load/offload/unload lifecycle, `GET/PUT /v1/config` round-trip + validation + `restart_required`, telemetry snapshot, event tail, processes list, health, CORS preflight grants only frontend origins
 
  |
 | **Stress** | `tests/stress_test.rs` | 32-way SSE token streams, mixed loads, 50 load/unload cycles, priority timing

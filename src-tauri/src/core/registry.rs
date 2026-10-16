@@ -193,6 +193,30 @@ impl Registry {
                     Residency::Cpu => 0,
                 },
                 idle_secs: now.duration_since(e.last_used).as_secs(),
+                active_jobs: e.active_jobs,
+                in_use: e.active_jobs > 0,
+            })
+            .collect()
+    }
+
+    /// Snapshot of only the models with at least one active job, i.e. the
+    /// models currently in use (streaming / generating).
+    pub fn snapshot_in_use(&self) -> Vec<crate::types::ModelRuntimeInfo> {
+        let now = Instant::now();
+        self.models
+            .values()
+            .filter(|e| e.active_jobs > 0)
+            .map(|e| crate::types::ModelRuntimeInfo {
+                id: e.spec.id.clone(),
+                model_type: e.spec.model_type,
+                residency: e.residency,
+                vram_bytes: match e.residency {
+                    Residency::Gpu => e.spec.vram_bytes,
+                    Residency::Cpu => 0,
+                },
+                idle_secs: now.duration_since(e.last_used).as_secs(),
+                active_jobs: e.active_jobs,
+                in_use: true,
             })
             .collect()
     }

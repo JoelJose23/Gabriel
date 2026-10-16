@@ -27,6 +27,8 @@
   --color-status-running:   #10a37f;
   --color-status-idle:      #9CA3AF;
   --color-status-warning:   var(--color-text-secondary);
+  --color-danger:           #EF4444;
+  --color-warning:          #D97706;
   --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --radius-2xl: 20px;
   --radius-xl:  14px;

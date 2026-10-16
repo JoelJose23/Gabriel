@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use crate::core::engine::EngineState;
 
 pub async fn serve(engine: EngineState) -> std::io::Result<()> {
-    let cfg = engine.config().clone();
+    let cfg = engine.config();
     let addr = SocketAddr::new(
         cfg.host
             .parse()

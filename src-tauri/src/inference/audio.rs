@@ -1,6 +1,6 @@
 use crate::error::{GabrielError, Result};
 
-pub const SAMPLE_RATE_HZ: u32 = 22_050;
+pub const SAMPLE_RATE_HZ: u32 = 24_000;
 
 pub struct WavBuilder {
     sample_rate: u32,

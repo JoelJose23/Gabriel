@@ -234,4 +234,7 @@ pub struct GabrielModelMeta {
     pub model_type: String,
     pub residency: String,
     pub vram_bytes: u64,
+    pub active_jobs: usize,
+    pub in_use: bool,
+    pub idle_secs: u64,
 }

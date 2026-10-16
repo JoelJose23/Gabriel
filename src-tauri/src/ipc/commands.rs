@@ -42,3 +42,10 @@ pub async fn list_loaded_models(
 ) -> Result<Vec<crate::types::ModelRuntimeInfo>> {
     Ok(state.list_models())
 }
+
+#[tauri::command]
+pub async fn list_models_in_use(
+    state: State<'_, EngineState>,
+) -> Result<Vec<crate::types::ModelRuntimeInfo>> {
+    Ok(state.list_models_in_use())
+}

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Gabriel - native zero-crash multi-modal local AI engine"
 authors = ["you"]
 edition = "2024"
+default-run = "gabriel"
 rust-version = "1.85"
 
 [lib]
@@ -22,6 +23,8 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tower-http = { version = "0.6", features = ["cors"] }
+dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 async-trait = "0.1"

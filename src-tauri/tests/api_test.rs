@@ -242,3 +242,253 @@ async fn unload_removes_model_and_subsequent_requests_fail() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+async fn json_body(body: Body) -> Value {
+    let bytes = body_bytes(body).await;
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, json_body(res.into_body()).await)
+}
+
+async fn post_json(app: &axum::Router, uri: &str, payload: Value) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, json_body(res.into_body()).await)
+}
+
+async fn put_json(app: &axum::Router, uri: &str, payload: Value) -> (StatusCode, Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    (status, json_body(res.into_body()).await)
+}
+
+fn default_config_json() -> Value {
+    serde_json::to_value(gabriel_lib::core::EngineConfigDto::default()).unwrap()
+}
+
+#[tokio::test]
+async fn telemetry_endpoint_returns_snapshot() {
+    let app = build_router(test_engine());
+    let (status, v) = get_json(&app, "/v1/telemetry").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(v.get("gpu_name").is_some());
+    assert!(v.get("vram_total_bytes").is_some());
+    assert!(v.get("loaded_models").is_some());
+}
+
+#[tokio::test]
+async fn model_lifecycle_endpoints_load_offload_unload() {
+    let app = build_router(test_engine());
+
+    let (status, v) = post_json(
+        &app,
+        "/v1/models/load",
+        json!({"model_id": "rest-llm", "model_type": "llm"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["model_id"], "rest-llm");
+    assert_eq!(v["residency"], "gpu");
+
+    let (status, _) = get_json(&app, "/v1/models").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, v) = post_json(&app, "/v1/models/offload", json!({"model_id": "rest-llm"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["residency"], "cpu");
+
+    let (status, v) = post_json(&app, "/v1/models/unload", json!({"model_id": "rest-llm"})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+
+    let (status, _) = post_json(&app, "/v1/models/unload", json!({"model_id": "rest-llm"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn load_with_unknown_type_is_400() {
+    let app = build_router(test_engine());
+    let (status, _) = post_json(
+        &app,
+        "/v1/models/load",
+        json!({"model_id": "x", "model_type": "banana"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn config_get_put_round_trip() {
+    // Keep the on-disk write out of the real user config directory.
+    let tmp = std::env::temp_dir().join(format!("gabriel-test-config-{}", std::process::id()));
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", &tmp) };
+
+    let app = build_router(test_engine());
+
+    let (status, before) = get_json(&app, "/v1/config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["max_loaded_models"], 4);
+
+    let mut dto = before.clone();
+    dto["max_loaded_models"] = json!(6);
+    dto["auto_load_on_request"] = json!(true);
+    dto["vram_high_watermark"] = json!(0.9);
+
+    let (status, v) = put_json(&app, "/v1/config", dto).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["config"]["max_loaded_models"], 6);
+    assert_eq!(v["config"]["auto_load_on_request"], true);
+    assert_eq!(v["restart_required"], json!([]));
+
+    let (status, after) = get_json(&app, "/v1/config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["max_loaded_models"], 6);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn config_put_rejects_invalid_values() {
+    let app = build_router(test_engine());
+    let mut dto = default_config_json();
+    dto["vram_low_watermark"] = json!(0.95);
+    dto["vram_high_watermark"] = json!(0.5);
+
+    let (status, _) = put_json(&app, "/v1/config", dto).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn config_put_reports_restart_required_fields() {
+    let tmp = std::env::temp_dir().join(format!("gabriel-test-config-r-{}", std::process::id()));
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", &tmp) };
+
+    let app = build_router(test_engine());
+    let mut dto = default_config_json();
+    dto["port"] = json!(9090);
+
+    let (status, v) = put_json(&app, "/v1/config", dto).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["restart_required"], json!(["port"]));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn events_endpoint_reports_model_lifecycle() {
+    let app = build_router(test_engine());
+    let (status, v) = post_json(
+        &app,
+        "/v1/models/load",
+        json!({"model_id": "event-model", "model_type": "tts"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+
+    let (status, events) = get_json(&app, "/v1/system/events?after=0").await;
+    assert_eq!(status, StatusCode::OK);
+    let list = events["events"].as_array().expect("events array");
+    assert!(!list.is_empty());
+    assert!(
+        list.iter()
+            .any(|e| e["message"].as_str().map(|m| m.contains("event-model")) == Some(true)),
+        "expected load event, got {list:?}"
+    );
+
+    let last_seq = list.last().unwrap()["seq"].as_u64().unwrap();
+    let (_, after) = get_json(&app, &format!("/v1/system/events?after={last_seq}")).await;
+    assert_eq!(after["events"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn health_reports_engine_status() {
+    let app = build_router(test_engine());
+    let (status, v) = get_json(&app, "/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["status"], "ok");
+    assert!(v["version"].as_str().is_some());
+    assert!(v.get("uptime_secs").is_some());
+}
+
+#[tokio::test]
+async fn processes_endpoint_returns_sorted_list() {
+    let app = build_router(test_engine());
+    let (status, v) = get_json(&app, "/v1/system/processes").await;
+    assert_eq!(status, StatusCode::OK);
+    let list = v["processes"].as_array().expect("processes array");
+    assert!(!list.is_empty());
+    assert!(list[0].get("pid").is_some());
+    assert!(list[0].get("name").is_some());
+}
+
+#[tokio::test]
+async fn cors_preflight_grants_frontend_origin_only() {
+    let app = build_router(test_engine());
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/telemetry")
+                .header("origin", "http://localhost:5173")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+        Some("http://localhost:5173")
+    );
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/telemetry")
+                .header("origin", "https://evil.example")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(res.headers().get("access-control-allow-origin").is_none());
+}

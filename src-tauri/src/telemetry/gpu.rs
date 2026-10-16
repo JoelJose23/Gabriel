@@ -5,6 +5,9 @@ pub struct GpuSample {
     pub used_bytes: u64,
     pub utilization_percent: f32,
     pub memory_bandwidth_percent: f32,
+    pub temperature_c: u32,
+    pub power_w: f32,
+    pub driver_version: String,
 }
 
 pub trait GpuMonitor: std::fmt::Debug {
@@ -49,12 +52,20 @@ mod nvml_monitor {
                 .utilization_rates()
                 .map(|u| (u.gpu as f32, u.memory as f32))
                 .unwrap_or((0.0, 0.0));
+            let temperature_c = device
+                .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+                .unwrap_or(0);
+            let power_w = device.power_usage().map(|mw| mw as f32 / 1000.0).unwrap_or(0.0);
+            let driver_version = guard.sys_driver_version().unwrap_or_default();
             GpuSample {
                 name,
                 total_bytes: mem.total,
                 used_bytes: mem.used,
                 utilization_percent: util.0,
                 memory_bandwidth_percent: util.1,
+                temperature_c,
+                power_w,
+                driver_version,
             }
         }
     }

@@ -1,8 +1,10 @@
 use sysinfo::System;
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct SystemSampler {
     sys: System,
+    last_cpu_refresh: Instant,
 }
 
 impl Default for SystemSampler {
@@ -16,9 +18,12 @@ impl SystemSampler {
         let mut sys = System::new();
         sys.refresh_memory();
         sys.refresh_cpu_usage();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
         sys.refresh_cpu_usage();
-        Self { sys }
+        Self {
+            sys,
+            last_cpu_refresh: Instant::now(),
+        }
     }
 
     pub fn refresh(&mut self) {
@@ -26,7 +31,11 @@ impl SystemSampler {
     }
 
     pub fn refresh_cpu(&mut self) {
+        if self.last_cpu_refresh.elapsed() < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            return;
+        }
         self.sys.refresh_cpu_usage();
+        self.last_cpu_refresh = Instant::now();
     }
 
     pub fn total_ram_bytes(&self) -> u64 {

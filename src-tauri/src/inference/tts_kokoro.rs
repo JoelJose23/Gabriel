@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::sync::Mutex;
 use async_trait::async_trait;
 use kokoro_tiny::TtsEngine;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::error::{GabrielError, Result};
 use crate::inference::SpeechBackend;
@@ -27,7 +27,11 @@ fn map_voice_name(voice: &str) -> String {
         "nova" => "af_sarah".to_string(),
         "onyx" => "am_michael".to_string(),
         "shimmer" => "af_sky".to_string(),
-        other if other.starts_with("af_") || other.starts_with("am_") || other.starts_with("bf_") => other.to_string(),
+        other
+            if other.starts_with("af_") || other.starts_with("am_") || other.starts_with("bf_") =>
+        {
+            other.to_string()
+        }
         _ => "af_sarah".to_string(),
     }
 }
@@ -37,10 +41,12 @@ impl KokoroSpeechBackend {
         tracing::info!("kokoro-tts: initializing native Kokoro-82M engine");
 
         let tts = tokio::task::spawn(async move {
-            TtsEngine::new().await.map_err(|e| GabrielError::WeightLoadFailed {
-                model_id: "kokoro-82m".into(),
-                detail: format!("{e}"),
-            })
+            TtsEngine::new()
+                .await
+                .map_err(|e| GabrielError::WeightLoadFailed {
+                    model_id: "kokoro-82m".into(),
+                    detail: format!("{e}"),
+                })
         })
         .await
         .map_err(|_| GabrielError::Backend("Kokoro initialization task panicked".into()))??;
@@ -60,7 +66,7 @@ impl KokoroSpeechBackend {
             .synthesize(text, Some(&kokoro_voice))
             .map_err(|e| GabrielError::Backend(format!("Kokoro synthesis failed: {e}")))?;
 
-        let sample_rate = 24000;
+        let sample_rate = crate::inference::audio::SAMPLE_RATE_HZ;
         let wav_bytes = pcm_f32_to_wav(&samples, sample_rate);
         Ok(wav_bytes)
     }
@@ -86,8 +92,14 @@ impl SpeechBackend for KokoroSpeechBackend {
 fn pcm_f32_to_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
     let mut wav = crate::inference::audio::WavBuilder::new(sample_rate);
     for &s in pcm {
+        if s.is_nan() || s.is_infinite() {
+            wav.push_sample(0);
+            continue;
+        }
+        // Strict clamp to prevent digital clipping wrap-around noise
         let clamped = s.clamp(-1.0, 1.0);
-        wav.push_sample((clamped * i16::MAX as f32) as i16);
+        let scaled = (clamped * 32767.0) as i16;
+        wav.push_sample(scaled);
     }
     wav.finish()
 }
