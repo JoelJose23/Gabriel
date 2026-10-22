@@ -64,8 +64,13 @@ impl ModelSpec {
             || lower.contains("lykon")
             || lower.contains("lcm")
             || lower.contains("kokoro")
+            || lower.contains("piper")
+            || lower.contains("vits")
+            || lower.contains("sherpa")
+            || lower.contains("matcha")
             || lower.ends_with(".gguf")
-            || lower.ends_with(".safetensors");
+            || lower.ends_with(".safetensors")
+            || lower.ends_with(".onnx");
 
         let default_bytes = if is_real {
             model_type.default_vram_budget()

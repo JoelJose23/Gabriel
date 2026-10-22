@@ -18,7 +18,10 @@ pub mod image;
 #[cfg(feature = "candle-cuda")]
 pub mod image_candle;
 #[cfg(feature = "tts-kokoro")]
+#[allow(dead_code)]
 pub mod tts_kokoro;
+#[cfg(feature = "tts-sherpa")]
+pub mod tts_sherpa;
 
 #[async_trait]
 pub trait TextBackend: Send + Sync + std::fmt::Debug {
@@ -43,10 +46,10 @@ pub trait ImageBackend: Send + Sync + std::fmt::Debug {
     }
 }
 
-    #[async_trait]
-    pub trait SpeechBackend: Send + Sync + std::fmt::Debug {
-        async fn synthesize(&self, text: &str, voice: &str, force_cpu: bool) -> Result<Vec<u8>>;
-    }
+#[async_trait]
+pub trait SpeechBackend: Send + Sync + std::fmt::Debug {
+    async fn synthesize(&self, text: &str, voice: &str, force_cpu: bool) -> Result<Vec<u8>>;
+}
 
 #[derive(Debug, Clone)]
 pub struct BackendFactory {
@@ -72,9 +75,18 @@ impl BackendFactory {
             || lower.contains("lykon")
             || lower.contains("lcm")
             || lower.contains("kokoro")
+            || lower.contains("piper")
+            || lower.contains("vits")
+            || lower.contains("sherpa")
+            || lower.contains("matcha")
             || lower.ends_with(".gguf")
-            || lower.ends_with(".safetensors");
-        #[cfg(not(any(feature = "candle-cuda", feature = "tts-kokoro")))]
+            || lower.ends_with(".safetensors")
+            || lower.ends_with(".onnx");
+        #[cfg(not(any(
+            feature = "candle-cuda",
+            feature = "tts-kokoro",
+            feature = "tts-sherpa"
+        )))]
         let _ = is_real;
 
         #[cfg(feature = "candle-cuda")]
@@ -89,35 +101,33 @@ impl BackendFactory {
                     // "sd-turbo" ids are routed here too (SD-Turbo weights are
                     // preserved in `hub::SdTurboFiles` for a future re-enable
                     // but no longer pulled).
-                    let backend = image::DreamShaperBackend::load(
-                        spec.id.clone(),
-                        self.governor.clone(),
-                    )
-                    .await?;
+                    let backend =
+                        image::DreamShaperBackend::load(spec.id.clone(), self.governor.clone())
+                            .await?;
                     return Ok(ModelHandle::Image(Arc::new(backend)));
                 }
                 _ => {}
             }
         }
 
-        #[cfg(feature = "tts-kokoro")]
+        #[cfg(feature = "tts-sherpa")]
+        if is_real && spec.model_type == crate::types::ModelType::Tts {
+            let backend = tts_sherpa::SherpaSpeechBackend::load(spec.id.clone()).await?;
+            return Ok(ModelHandle::Speech(Arc::new(backend)));
+        }
+        #[cfg(all(not(feature = "tts-sherpa"), feature = "tts-kokoro"))]
         if is_real && spec.model_type == crate::types::ModelType::Tts {
             let backend = tts_kokoro::KokoroSpeechBackend::load(spec.id.clone()).await?;
             return Ok(ModelHandle::Speech(Arc::new(backend)));
         }
 
         match spec.model_type {
-            crate::types::ModelType::Llm | crate::types::ModelType::Embedding => {
-                Ok(ModelHandle::Text(Arc::new(stub::StubTextBackend::new(
-                    spec.id.clone(),
-                ))))
-            }
-            crate::types::ModelType::Image => {
-                Ok(ModelHandle::Image(Arc::new(stub::StubImageBackend::new(
-                    spec.id.clone(),
-                    self.governor.clone(),
-                ))))
-            }
+            crate::types::ModelType::Llm | crate::types::ModelType::Embedding => Ok(
+                ModelHandle::Text(Arc::new(stub::StubTextBackend::new(spec.id.clone()))),
+            ),
+            crate::types::ModelType::Image => Ok(ModelHandle::Image(Arc::new(
+                stub::StubImageBackend::new(spec.id.clone(), self.governor.clone()),
+            ))),
             crate::types::ModelType::Tts => Ok(ModelHandle::Speech(Arc::new(
                 stub::StubSpeechBackend::new(spec.id.clone()),
             ))),
