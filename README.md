@@ -360,12 +360,8 @@ The testing suite verifies engine stability across multiple specialized isolatio
 | **Failure Management** | `tests/failure_test.rs` | Disconnects, unloads during active streaming, OOM rejections & recovery, backpressure
 
  |
-| **Bandwidth & Sharing** | `tests/bandwidth_test.rs` | EMA math, diffusion step pauses under pressure, chat stream immunity, slot pool rejections
-
- |
-| **Security** | `tests/security_test.rs` | Malformed JSON, >2MB body caps, input length limits, parameter clamping
-
- |
+| **Bandwidth & Sharing** | `tests/bandwidth_test.rs` | EMA math, diffusion step pauses under pressure, chat stream immunity, slot pool rejections |
+| **Security** | `tests/security_test.rs` | Malformed JSON, >2MB body caps, input length limits, parameter clamping |
 
 ---
 
