@@ -37,6 +37,11 @@ pub const VAE_TILE: usize = 32; // 32 latent px = 256 image px per tile
 pub const VAE_TILE_OVERLAP: usize = 8; // minimum overlap between neighbouring tiles
 pub const VAE_UP: usize = 8; // VAE upsampling factor
 
+/// Non-LCM SD 1.5 checkpoints need many more steps and real classifier-free
+/// guidance than the LCM-distilled default.
+pub const SD15_STEPS_DEFAULT: usize = 20;
+pub const SD15_CFG_DEFAULT: f64 = 7.5;
+
 /// UNet attention slice size (over batch*heads). Lower = less VRAM, slightly slower.
 pub const ATTENTION_SLICE: Option<usize> = None;
 
@@ -132,9 +137,16 @@ impl ImageGenParams {
     }
 
     pub fn normalized(mut self) -> Self {
-        self.steps = scheduler::clamp_lcm_steps(self.steps);
+        self.steps = match self.scheduler {
+            SchedulerKind::Lcm => scheduler::clamp_lcm_steps(self.steps),
+            // Non-LCM schedulers are not step-limited to the LCM window.
+            _ => self.steps.clamp(1, 50),
+        };
         if !self.cfg_scale.is_finite() {
-            self.cfg_scale = LCM_CFG_DEFAULT;
+            self.cfg_scale = match self.scheduler {
+                SchedulerKind::Lcm => LCM_CFG_DEFAULT,
+                _ => SD15_CFG_DEFAULT,
+            };
         }
         self.cfg_scale = self.cfg_scale.clamp(1.0, 8.0);
         self
@@ -165,6 +177,9 @@ pub struct DreamShaperBackend {
     pipeline: Arc<Mutex<Pipeline>>,
     governor: Arc<BandwidthGovernor>,
     resident_bytes: u64,
+    /// LCM-distilled checkpoint: few steps + low guidance. Non-LCM SD 1.5
+    /// checkpoints get the DDIM / 20-step / CFG 7.5 defaults instead.
+    lcm: bool,
 }
 
 impl std::fmt::Debug for DreamShaperBackend {
@@ -191,7 +206,7 @@ impl DreamShaperBackend {
         let mut profiler = CudaMemoryProfiler::new();
         profiler.checkpoint("Start Model Load");
 
-        let files = hub::DreamShaperFiles::pull()?;
+        let files = hub::dreamshaper_files_for(&model_id)?;
         let gpu_device = Device::cuda_if_available(0).map_err(|_| GabrielError::GpuQueryFailed)?;
         let cpu_device = Device::Cpu;
         let dtype = DType::F16;
@@ -272,6 +287,8 @@ impl DreamShaperBackend {
             VRAM_FALLBACK_ESTIMATE
         };
 
+        let lcm = hub::image_preset(&model_id).map(|p| p.lcm).unwrap_or(true);
+
         Ok(Self {
             model_id,
             pipeline: Arc::new(Mutex::new(Pipeline {
@@ -289,6 +306,7 @@ impl DreamShaperBackend {
             })),
             governor,
             resident_bytes,
+            lcm,
         })
     }
 
@@ -722,8 +740,13 @@ fn encode_png(image_chw_u8: Tensor) -> Result<Vec<u8>> {
 #[async_trait]
 impl ImageBackend for DreamShaperBackend {
     async fn generate(&self, prompt: &str, width: u32, height: u32) -> Result<Vec<u8>> {
-        self.generate_with_params(ImageGenParams::new(prompt, width, height))
-            .await
+        let mut params = ImageGenParams::new(prompt, width, height);
+        if !self.lcm {
+            params.steps = SD15_STEPS_DEFAULT;
+            params.cfg_scale = SD15_CFG_DEFAULT;
+            params.scheduler = SchedulerKind::Ddim;
+        }
+        self.generate_with_params(params).await
     }
 
     fn measured_vram_bytes(&self) -> Option<u64> {

@@ -1,5 +1,5 @@
-//! Real-weight showcase: Qwen2.5-3B (LLM) + DreamShaper-8-LCM (image) + TTS Kokoro (speech).
-//! Run: cargo run --example real_showcase --features tts-kokoro
+//! Real-weight showcase: Qwen2.5-3B (LLM) + DreamShaper-8-LCM (image) + Sherpa-ONNX TTS (speech).
+//! Run: cargo run --example real_showcase --features tts-sherpa
 //! Outputs: /tmp/gabriel_showcase.png, /tmp/gabriel_showcase.wav + live LLM tokens.
 //!
 //! Image synthesis uses 4-step LCM (FP16, 512x512, CFG 1.5).
@@ -11,7 +11,7 @@ use std::time::Instant;
 
 const LLM_ID: &str = "qwen2.5-3b-instruct";
 const IMAGE_ID: &str = "dreamshaper-8";
-const TTS_ID: &str = "tts_kokoro";
+const TTS_ID: &str = "sherpa-tts";
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
@@ -39,7 +39,7 @@ async fn main() {
     img_res.expect("load real image (DreamShaper-8-LCM, 4-step)");
     match tts_res {
         Ok(_) => println!("[tts] loaded successfully"),
-        Err(e) => println!("[tts] load failed (need --features tts-kokoro): {e}"),
+        Err(e) => println!("[tts] load failed (need --features tts-sherpa and a model in ~/.local/share/gabriel/models/tts): {e}"),
     }
     println!("All models loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
@@ -117,7 +117,7 @@ async fn main() {
         let tts_t0 = Instant::now();
         // Pipe the LLM text directly into the TTS engine
         let sp_rx = engine
-            .submit_speech(TTS_ID, full_llm_text.clone(), "nova".to_string())
+            .submit_speech(TTS_ID, full_llm_text.clone(), "nova".to_string(), 1.0)
             .await
             .expect("submit speech");
         let wav = tokio::time::timeout(std::time::Duration::from_secs(300), sp_rx)
@@ -135,7 +135,7 @@ async fn main() {
         println!("saved /tmp/gabriel_showcase.wav (RIFF OK)");
     } else {
         println!(
-            "skipped (TTS model not loaded — rerun with --features tts-kokoro for real voice)"
+            "skipped (TTS model not loaded — rerun with --features tts-sherpa for real voice)"
         );
     }
 

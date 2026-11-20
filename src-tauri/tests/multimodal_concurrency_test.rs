@@ -1,4 +1,4 @@
-#![cfg(all(feature = "candle-cuda", feature = "tts-kokoro"))]
+#![cfg(feature = "candle-cuda")]
 
 use gabriel_lib::core::EngineConfig;
 use gabriel_lib::core::engine::EngineState;
@@ -41,12 +41,13 @@ async fn multimodal_three_way_concurrency_under_pressure() {
         .await
         .expect("Failed to load SD-Turbo UNet");
 
-    // 3. TTS Kokoro (GPU-capable): Register 450_000_000 bytes (~0.45 GB)
+    // 3. TTS (demo voice → stub backend; load "sherpa-tts" with the
+    // tts-sherpa feature for real Sherpa-ONNX synthesis): Register 450_000_000 bytes (~0.45 GB)
     // Adaptive Scheduler will route to CUDA if budget allows, else fallback to CPU (0 VRAM)
     engine
-        .load_model("tts_kokoro", ModelType::Tts, Some(450_000_000))
+        .load_model("voice-demo", ModelType::Tts, Some(450_000_000))
         .await
-        .expect("Failed to load TTS Kokoro speech model");
+        .expect("Failed to load TTS speech model");
 
     // Total Static Load: ~3.95 GB (1.90 + 1.60 + 0.45) Well under the ~6.29 GB limit for an 8 GB card at 0.85 watermark
     let snap_pre = engine.telemetry_snapshot();
@@ -139,14 +140,15 @@ async fn multimodal_three_way_concurrency_under_pressure() {
             .expect("Image generation backend failed")
     });
 
-    // Task C: TTS Kokoro Speech Synthesis (CPU Out-of-Band Lane)
+    // Task C: TTS Speech Synthesis (CPU Out-of-Band Lane)
     let engine_tts = engine.clone();
     let tts_handle = tokio::spawn(async move {
         let speech_rx = engine_tts
             .submit_speech(
-                "tts_kokoro",
+                "voice-demo",
                 "Gabriel local AI engine active.".to_string(),
                 "nova".to_string(),
+                1.0,
             )
             .await
             .expect("TTS submission failed");
@@ -252,7 +254,7 @@ async fn multimodal_three_way_concurrency_under_pressure() {
     let tts_model = snap
         .loaded_models
         .iter()
-        .find(|m| m.id == "tts_kokoro")
+        .find(|m| m.id == "voice-demo")
         .expect("TTS model must be registered in engine state");
 
     assert!(

@@ -51,7 +51,7 @@ The frontend is built with a bespoke **"Aurora Glass"** design system inspired b
 | **Image Generation** | `POST /v1/images/generations` task-queued base64 PNG response. Real model: `DreamShaper-8-LCM` (4-step default, tiled VAE). Swappable LCM / DDIM / Euler-Ancestral schedulers.
 
  |
-| **Speech Synthesis** | `POST /v1/audio/speech` outputting 24 kHz WAV audio with voice mapping (`alloy`→`am_adam`, `nova`→`af_sarah`, `onyx`→`am_michael`, `shimmer`→`af_sky`) and dynamic amplitude visualizer. Real model: `Kokoro-82M`.
+| **Speech Synthesis** | `POST /v1/audio/speech` outputting WAV audio with voice mapping (`alloy`→speaker 0, `nova`→1, `onyx`→2, `shimmer`→3) and dynamic amplitude visualizer. Real model: Sherpa-ONNX (Piper / VITS / Kokoro ONNX).
 
  |
 | **Model Registry & Pager** | `GET /v1/models` tracks active residency and VRAM status. Automatically demotes idle models GPU ➔ System RAM when usage crosses watermarks.
@@ -133,7 +133,7 @@ React UI (Tauri WebView / Aurora Glass)
 │                            └──────────┬────────────┘                  │
 │                    inference/ (TextBackend · ImageBackend ·           │
 │                               SpeechBackend traits → factory)         │
-│                     real: Candle LLM · DreamShaper-8-LCM · Kokoro-82M │
+│                     real: Candle LLM · DreamShaper-8-LCM · Sherpa-ONNX TTS │
 │                     stub backends when features are off               │
 │                                      │                                │
 │  api/  axum @ 127.0.0.1:8080 ────────┘                                │
@@ -170,7 +170,7 @@ src-tauri/src/
 │   ├── hub.rs           HuggingFace pull helpers + GPU memory tracking
 │   ├── image/           DreamShaper backend, tiled GPU VAE decode, swappable schedulers
 │   ├── candle_backend.rs Candle Qwen2.5-3B GGUF text backend (CUDA)
-│   ├── tts_kokoro.rs    KokoroSpeechBackend (native kokoro-tiny, 24 kHz WAV)
+│   ├── tts_sherpa.rs    SherpaSpeechBackend (sherpa-onnx VITS/Kokoro ONNX, WAV)
 │   └── stub.rs          Deterministic stub engines used by tests/dev
 ├── api/
 │   ├── router.rs        Axum routing table + CORS layer (frontend origins only)
@@ -202,7 +202,7 @@ src/
 |---|---|---|---|
 | **LLM** | `qwen2.5-3b-instruct` | `Qwen/Qwen2.5-3B-Instruct-GGUF` | Candle GGUF on CUDA, measured VRAM delta[cite: 1] |
 | **Image** | `dreamshaper-8` | `Lykon/dreamshaper-8-lcm` | SD 1.5 layout, FP16 UNet on GPU, tiled VAE, 4-step LCM[cite: 1] |
-| **Speech** | `tts_kokoro` | `kokoro/kokoro-82m` via `kokoro-tiny` | Native engine, 24 kHz WAV[cite: 1] |
+| **Speech** | `sherpa-tts` | Local Sherpa-ONNX model folder (`~/.local/share/gabriel/models/tts`) | Piper / VITS / Kokoro ONNX via sherpa-onnx, WAV[cite: 1] |
 
 ---
 
@@ -224,7 +224,7 @@ curl http://127.0.0.1:8080/v1/images/generations \
 # Speech Synthesis
 curl http://127.0.0.1:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
-  -d '{"model":"tts_kokoro","input":"Gabriel online","voice":"nova"}' -o out.wav
+  -d '{"model":"sherpa-tts","input":"Gabriel online","voice":"nova"}' -o out.wav
 
 # Model Registry Telemetry
 curl http://127.0.0.1:8080/v1/models
@@ -294,7 +294,7 @@ EngineConfig {
   - *Linux:* `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`[cite: 1]
   - *macOS:* Xcode Command Line Tools[cite: 1]
   - *Windows:* WebView2 + MSVC Build Tools[cite: 1]
-- **System Speech Libraries** (for `--features tts-kokoro`): `libespeak-ng`, `libsonic`, `libpcaudio`[cite: 1]
+- **System Speech Models** (for `tts-sherpa`): a Sherpa-ONNX TTS model folder (Piper / VITS / Kokoro ONNX) under `~/.local/share/gabriel/models/tts`[cite: 1]
 - **Optional (GPU Acceleration):** NVIDIA CUDA Toolkit (for `candle-cuda` feature)[cite: 1]
 
 ### Feature Flags
@@ -304,7 +304,7 @@ EngineConfig {
 | `nvml` | Yes | NVML-backed VRAM/GPU telemetry (Linux, Windows)[cite: 1] |
 | `metal` | No | Metal-backed telemetry (macOS)[cite: 1] |
 | `candle-cuda` | Yes | Candle/CUDA backend for Qwen LLM & DreamShaper Image Gen[cite: 1] |
-| `tts-kokoro` | No | Native Kokoro-82M speech backend[cite: 1] |
+| `tts-sherpa` | Yes | Sherpa-ONNX speech backend (Piper / VITS / Kokoro ONNX)[cite: 1] |
 
 ### Development Commands
 
@@ -327,8 +327,8 @@ cargo tauri dev[cite: 1]
 # Run standalone backend server with deterministic stubs (No GPU needed)
 cargo run --example smoke_server[cite: 1]
 
-# Run real multimodal pipeline (Requires CUDA + tts-kokoro)
-cargo run --example real_showcase --features tts-kokoro[cite: 1]
+# Run real multimodal pipeline (Requires CUDA + tts-sherpa + local TTS model)
+cargo run --example real_showcase --features tts-sherpa[cite: 1]
 
 # Run full default test suite (Stubs, zero GPU required)
 cargo test[cite: 1]

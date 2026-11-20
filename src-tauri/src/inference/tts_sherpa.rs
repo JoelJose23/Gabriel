@@ -9,7 +9,7 @@ use sherpa_onnx::{
 };
 
 use crate::error::{GabrielError, Result};
-use crate::inference::SpeechBackend;
+use crate::inference::{SpeechBackend, tts_download};
 
 /// Supported TTS model architectures under Sherpa-ONNX.
 #[derive(Debug, Clone)]
@@ -124,7 +124,25 @@ impl SherpaSpeechBackend {
     pub async fn load(model_id: String) -> Result<Self> {
         tracing::info!(model_id = %model_id, "sherpa-tts: initializing OfflineTts engine");
 
-        let resolved_dir = Self::resolve_model_dir(&model_id)?;
+        // Resolve a local copy; download a known preset on first click.
+        let mut resolved_dir = Self::resolve_model_dir(&model_id)?;
+        if !resolved_dir.join("tokens.txt").exists() {
+            let download_id = model_id.clone();
+            if let Some(downloaded) =
+                tokio::task::spawn_blocking(move || tts_download::ensure_model_downloaded(&download_id))
+                    .await
+                    .map_err(|e| GabrielError::Backend(format!("sherpa-tts download task panicked: {e}")))?
+                    .map_err(|e| {
+                        GabrielError::WeightLoadFailed {
+                            model_id: model_id.clone(),
+                            detail: format!("sherpa-tts preset download failed: {e}"),
+                        }
+                    })?
+            {
+                resolved_dir = downloaded;
+            }
+        }
+
         let id_clone = model_id.clone();
 
         tokio::task::spawn_blocking(move || Self::load_blocking(id_clone, &resolved_dir))
@@ -225,8 +243,10 @@ impl SherpaSpeechBackend {
             .join("tts");
 
         // Exact subdirectory match: e.g. `~/.local/share/gabriel/models/tts/vits-piper-en_US-lessac-medium`
+        // Only a directory that actually holds a model counts — an interrupted
+        // download (weights but no `tokens.txt`) must not shadow a usable one.
         let exact = base.join(model_id);
-        if exact.is_dir() {
+        if exact.is_dir() && exact.join("tokens.txt").exists() {
             return Ok(exact);
         }
 
@@ -239,7 +259,7 @@ impl SherpaSpeechBackend {
 
         for candidate in fallbacks {
             let path = base.join(candidate);
-            if path.is_dir() {
+            if path.is_dir() && path.join("tokens.txt").exists() {
                 return Ok(path);
             }
         }
@@ -280,16 +300,19 @@ impl SherpaSpeechBackend {
 
 #[async_trait]
 impl SpeechBackend for SherpaSpeechBackend {
-    async fn synthesize(&self, text: &str, voice: &str, _force_cpu: bool) -> Result<Vec<u8>> {
+    async fn synthesize(&self, text: &str, voice: &str, speed: f32, _force_cpu: bool) -> Result<Vec<u8>> {
         let owned_text = text.to_string();
         let sid = self.map_speaker_id(voice);
+        // Sherpa-ONNX validates speed at generation time; keep it inside the
+        // sane OpenAI-compatible range the REST route enforces.
+        let speed = speed.clamp(0.25, 4.0);
         let fallback_sr = self.sample_rate;
         let tts = Arc::clone(&self.tts);
 
         tokio::task::spawn_blocking(move || {
             let cfg = GenerationConfig {
                 sid,
-                speed: 1.0,
+                speed,
                 silence_scale: 0.2,
                 ..Default::default()
             };

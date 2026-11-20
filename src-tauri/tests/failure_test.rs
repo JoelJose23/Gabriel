@@ -139,6 +139,7 @@ async fn scheduler_rejects_jobs_when_lane_saturated() {
         kind: JobKind::Speech {
             text: format!("job{n}"),
             voice: "alloy".into(),
+            speed: 1.0,
             reply: tokio::sync::oneshot::channel().0,
             cpu_fallback: false,
         },

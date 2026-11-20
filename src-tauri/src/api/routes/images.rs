@@ -1,12 +1,10 @@
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 
 use crate::core::engine::EngineState;
 use crate::error::{ApiError, GabrielError};
 use crate::inference::audio::validate_dimensions;
-use crate::types::openai::{
-    ImageData, ImageGenerationRequest, ImageGenerationResponse,
-};
+use crate::types::openai::{ImageData, ImageGenerationRequest, ImageGenerationResponse};
 
 #[axum::debug_handler]
 pub async fn images_generations(
@@ -29,6 +27,7 @@ pub async fn images_generations(
     let n = req.n.clamp(1, 4);
     let model_id = req.model.unwrap_or_else(|| "gabriel-diffusion".into());
 
+    let image_dir = engine.config().image_dir;
     let mut data = Vec::with_capacity(n as usize);
     for _ in 0..n {
         let rx = engine
@@ -40,6 +39,19 @@ pub async fn images_generations(
             .await
             .map_err(|_| ApiError(GabrielError::Internal("image job dropped".into())))?
             .map_err(ApiError)?;
+
+        if let Err(e) = crate::core::storage::save_image_artifact(
+            &image_dir,
+            &bytes,
+            &req.prompt,
+            &model_id,
+            width,
+            height,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to persist image artifact to workspace");
+        }
 
         data.push(ImageData {
             b64_json: base64_encode(&bytes),
@@ -56,9 +68,9 @@ fn parse_size(size: Option<&str>) -> crate::error::Result<(u32, u32)> {
     let Some(raw) = size else {
         return validate_dimensions(512, 512);
     };
-    let (w, h) = raw
-        .split_once('x')
-        .ok_or_else(|| GabrielError::InvalidRequest(format!("invalid size '{raw}', expected WxH")))?;
+    let (w, h) = raw.split_once('x').ok_or_else(|| {
+        GabrielError::InvalidRequest(format!("invalid size '{raw}', expected WxH"))
+    })?;
     let width = w
         .trim()
         .parse::<u32>()
@@ -70,8 +82,7 @@ fn parse_size(size: Option<&str>) -> crate::error::Result<(u32, u32)> {
     validate_dimensions(width, height)
 }
 
-const BASE64_TABLE: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);

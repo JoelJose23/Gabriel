@@ -32,7 +32,7 @@ export const playgroundImageModels: SelectOption[] = [
 ];
 
 export const playgroundVoiceModels: SelectOption[] = [
-  { value: 'kokoro-tts', label: 'Kokoro TTS' },
+  { value: 'sherpa-tts', label: 'Sherpa TTS' },
   { value: 'xtts-v2', label: 'XTTS v2' },
   { value: 'bark', label: 'Bark' },
   { value: 'whisper-large-v3', label: 'Whisper Large v3' },

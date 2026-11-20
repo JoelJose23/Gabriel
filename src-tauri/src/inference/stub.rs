@@ -132,7 +132,9 @@ where
 
 #[async_trait]
 impl SpeechBackend for StubSpeechBackend {
-    async fn synthesize(&self, text: &str, voice: &str, _force_cpu: bool) -> Result<Vec<u8>> {
+    async fn synthesize(&self, text: &str, voice: &str, speed: f32, _force_cpu: bool) -> Result<Vec<u8>> {
+        // Keep the rate slider usable on the demo path: slower speed = longer clip.
+        let speed = speed.clamp(0.25, 4.0);
         let base_hz = match voice.to_ascii_lowercase().as_str() {
             "alloy" | "echo" => 150.0,
             "fable" | "onyx" => 120.0,
@@ -140,7 +142,7 @@ impl SpeechBackend for StubSpeechBackend {
             _ => 175.0,
         };
 
-        let duration_secs = (text.len() as f32 * 0.055).clamp(0.4, 30.0);
+        let duration_secs = (text.len() as f32 * 0.055 / speed).clamp(0.4, 30.0);
         let total_samples = (duration_secs * SAMPLE_RATE_HZ as f32) as usize;
         // Use isolated pool to avoid hijacking all system threads
         let model_id = self.model_id.clone();

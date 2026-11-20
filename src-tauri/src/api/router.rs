@@ -1,13 +1,16 @@
 use std::time::Duration;
 
-use axum::http::{HeaderName, HeaderValue, Method};
-use axum::routing::{get, post};
 use axum::Router;
+use axum::http::{HeaderName, HeaderValue, Method};
+use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::core::engine::EngineState;
 
-use super::routes::{chat, config, health, images, models_list, models_manage, speech, system, telemetry};
+use super::routes::{
+    catalogue, chat, config, health, images, models_list, models_manage, speech, storage, system,
+    telemetry,
+};
 
 pub fn build_router(engine: EngineState) -> Router {
     Router::new()
@@ -16,6 +19,8 @@ pub fn build_router(engine: EngineState) -> Router {
         .route("/v1/audio/speech", post(speech::audio_speech))
         .route("/v1/models", get(models_list::list_models))
         .route("/v1/models/in_use", get(models_list::list_models_in_use))
+        .route("/v1/models/catalogue", get(catalogue::list_catalogue))
+        .route("/v1/models/install", post(catalogue::install_model))
         .route("/v1/models/load", post(models_manage::load_model))
         .route("/v1/models/offload", post(models_manage::offload_model))
         .route("/v1/models/unload", post(models_manage::unload_model))
@@ -24,6 +29,27 @@ pub fn build_router(engine: EngineState) -> Router {
             "/v1/config",
             get(config::get_config).put(config::put_config),
         )
+        .route(
+            "/v1/storage/paths",
+            get(storage::get_paths).put(storage::update_paths),
+        )
+        .route(
+            "/v1/storage/llm",
+            get(storage::list_llm).post(storage::save_llm),
+        )
+        .route("/v1/storage/llm/{id}", delete(storage::delete_llm))
+        .route("/v1/storage/images", get(storage::list_images))
+        .route(
+            "/v1/storage/images/file/{filename}",
+            get(storage::serve_image_file),
+        )
+        .route("/v1/storage/images/{id}", delete(storage::delete_image))
+        .route("/v1/storage/tts", get(storage::list_tts))
+        .route(
+            "/v1/storage/tts/file/{filename}",
+            get(storage::serve_tts_file),
+        )
+        .route("/v1/storage/tts/{id}", delete(storage::delete_tts))
         .route("/v1/system/processes", get(system::list_processes))
         .route("/v1/system/events", get(system::list_events))
         .route("/health", get(health::health))
@@ -56,8 +82,6 @@ fn cors_layer() -> CorsLayer {
         ])
         .max_age(Duration::from_secs(600));
 
-    // Origins must be valid HeaderValues; skip any that are not (never are
-    // for these literals, but stay tolerant rather than panicking).
     let origins: Vec<HeaderValue> = allowed_origins
         .iter()
         .filter_map(|o| HeaderValue::from_str(o).ok())

@@ -110,9 +110,14 @@ impl CandleTextBackend {
 
     fn load_blocking(model_id: String) -> Result<Self> {
         let load_tag = model_id.clone();
-        tracing::info!("candle-llm: fetching Qwen2.5-3B-Instruct GGUF (Q4_K_M) via hf-hub");
-        let gguf_path = hub::pull_file(hub::QWEN_GGUF_REPO, hub::QWEN_GGUF_FILE)?;
-        let tokenizer_path = hub::pull_file(hub::QWEN_TOKENIZER_REPO, "tokenizer.json")?;
+        let preset = hub::gguf_preset(&model_id).unwrap_or_else(hub::default_gguf_preset);
+        tracing::info!(
+            preset = preset.id,
+            repo = preset.repo,
+            "candle-llm: fetching GGUF via hf-hub"
+        );
+        let gguf_path = hub::pull_file(preset.repo, preset.file)?;
+        let tokenizer_path = hub::pull_file(preset.tokenizer_repo, "tokenizer.json")?;
 
         let before = hub::gpu_used_bytes()?;
         let device = Device::cuda_if_available(0).map_err(|_| GabrielError::GpuQueryFailed)?;

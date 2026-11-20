@@ -7,6 +7,7 @@ import type {
   EventsResponse,
   HealthResponse,
   ImageGenerationResponse,
+  ModelCatalogueResponse,
   ModelListResponse,
   ModelStatus,
   ProcessListResponse,
@@ -35,6 +36,20 @@ export function offloadModel(modelId: string): Promise<ModelStatus> {
 
 export function unloadModel(modelId: string): Promise<ModelStatus> {
   return apiPost<ModelStatus>('/v1/models/unload', { model_id: modelId });
+}
+
+/** Installable models with their recommended specs and install status. */
+export function getModelCatalogue(signal?: AbortSignal): Promise<ModelCatalogueResponse> {
+  return apiGet<ModelCatalogueResponse>('/v1/models/catalogue', signal);
+}
+
+/**
+ * One-click install: downloads the model's weights and loads it into the
+ * engine. Long-running (weights can be gigabytes), so callers should show
+ * progress and not expect an instant response.
+ */
+export function installModel(modelId: string): Promise<ModelStatus> {
+  return apiPost<ModelStatus>('/v1/models/install', { model_id: modelId });
 }
 
 // --- config ----------------------------------------------------------------

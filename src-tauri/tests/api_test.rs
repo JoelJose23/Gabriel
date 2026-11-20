@@ -492,3 +492,86 @@ async fn cors_preflight_grants_frontend_origin_only() {
         .unwrap();
     assert!(res.headers().get("access-control-allow-origin").is_none());
 }
+#[tokio::test]
+async fn catalogue_endpoint_lists_installable_models_with_specs() {
+    let app = build_router(test_engine());
+    let (status, body) = get_json(&app, "/v1/models/catalogue").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let data = body["data"].as_array().expect("data must be an array");
+    assert!(
+        data.len() >= 8,
+        "the install panel must offer a real choice, got {} entries",
+        data.len()
+    );
+
+    for entry in data {
+        assert!(
+            entry["id"].as_str().is_some_and(|s| !s.is_empty()),
+            "entry needs an id: {entry}"
+        );
+        assert!(
+            entry["name"].as_str().is_some_and(|s| !s.is_empty()),
+            "entry needs a display name: {entry}"
+        );
+        assert!(
+            entry["summary"].as_str().is_some_and(|s| !s.is_empty()),
+            "entry needs a summary: {entry}"
+        );
+        assert!(
+            matches!(entry["kind"].as_str(), Some("llm" | "image" | "tts")),
+            "entry kind must be one of llm/image/tts: {entry}"
+        );
+        assert!(
+            entry["download_bytes"].as_u64().is_some_and(|b| b > 0),
+            "entry must state how big the download is: {entry}"
+        );
+        assert!(
+            entry["recommended_ram_bytes"]
+                .as_u64()
+                .is_some_and(|b| b > 0),
+            "entry must state the RAM it needs: {entry}"
+        );
+        assert!(
+            entry["recommended_vram_bytes"].is_u64(),
+            "entry must state its VRAM requirement (0 for CPU-only): {entry}"
+        );
+        assert!(
+            entry["installed"].is_boolean(),
+            "entry must report whether it is already installed: {entry}"
+        );
+    }
+
+    // Voice models run on the CPU, so they must not claim VRAM.
+    for entry in data.iter().filter(|e| e["kind"] == json!("tts")) {
+        assert_eq!(
+            entry["recommended_vram_bytes"],
+            json!(0),
+            "TTS entries must report zero VRAM: {entry}"
+        );
+    }
+
+    assert!(
+        data.iter().any(|e| e["recommended"] == json!(true)),
+        "the catalogue must mark its default pick in each family"
+    );
+}
+
+#[tokio::test]
+async fn install_with_unknown_model_id_is_400() {
+    let app = build_router(test_engine());
+    let (status, body) = post_json(
+        &app,
+        "/v1/models/install",
+        json!({ "model_id": "not-a-real-model" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["type"], json!("invalid_request"));
+    assert_eq!(
+        body["error"]["code"],
+        json!("invalid_request"),
+        "rejected installs must carry a machine-readable code"
+    );
+}

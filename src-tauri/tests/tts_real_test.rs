@@ -1,19 +1,19 @@
-#![cfg(feature = "tts-kokoro")]
+#![cfg(feature = "tts-sherpa")]
 
 use gabriel_lib::core::engine::EngineState;
 use gabriel_lib::core::EngineConfig;
-use gabriel_lib::inference::tts_kokoro::KokoroSpeechBackend;
+use gabriel_lib::inference::tts_sherpa::SherpaSpeechBackend;
 use gabriel_lib::inference::SpeechBackend;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "downloads tts_kokoro (~1 GB) and runs slow CPU inference; run with `cargo test --features tts-kokoro -- --ignored`"]
-async fn kokoro_synthesizes_wav_without_touching_vram() {
-    let backend = KokoroSpeechBackend::load("kokoro-82m".into())
+#[ignore = "requires a Sherpa-ONNX TTS model in ~/.local/share/gabriel/models/tts and runs slow CPU inference; run with `cargo test --features tts-sherpa -- --ignored`"]
+async fn sherpa_synthesizes_wav_without_touching_vram() {
+    let backend = SherpaSpeechBackend::load("sherpa-tts".into())
         .await
-        .expect("kokoro load must succeed");
+        .expect("sherpa load must succeed");
 
     let t0 = std::time::Instant::now();
-    let wav = backend.synthesize("Hello from Gabriel.", "nova", true).await;
+    let wav = backend.synthesize("Hello from Gabriel.", "nova", 1.0, true).await;
     let elapsed = t0.elapsed();
     println!("synthesis took {elapsed:?}");
 

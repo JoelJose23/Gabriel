@@ -8,6 +8,9 @@ import {
   Cpu,
   Loader2,
   AlertCircle,
+  Download,
+  Check,
+  X,
 } from 'lucide-react';
 import {
   StatusDot,
@@ -15,8 +18,8 @@ import {
   Select,
   Pill,
 } from '../components/shared';
-import { listModels, loadModel, offloadModel, unloadModel } from '../api';
-import type { ModelKind, ModelListEntry } from '../types/api';
+import { getModelCatalogue, installModel, listModels, loadModel, offloadModel, unloadModel } from '../api';
+import type { CatalogueEntry, CatalogueKind, ModelKind, ModelListEntry } from '../types/api';
 import { useTelemetry } from '../hooks/useTelemetry';
 import { useCardSpotlight } from '../hooks/useCardSpotlight';
 
@@ -64,13 +67,13 @@ const presets: Preset[] = [
     estimateVramGb: 2.4,
   },
   {
-    id: 'kokoro-82m',
-    name: 'Kokoro 82M TTS',
+    id: 'sherpa-tts',
+    name: 'Sherpa-ONNX TTS',
     type: 'Voice',
     kind: 'tts',
-    role: 'Local text-to-speech (~1 GB). Demo voice when built without the tts-kokoro feature.',
-    sizeLabel: '~1.0 GB',
-    estimateVramGb: 1.0,
+    role: 'Local text-to-speech via Sherpa-ONNX (Piper / VITS / Kokoro ONNX). Resolves from ~/.local/share/gabriel/models/tts; demo voice when no model folder is found.',
+    sizeLabel: '~0.1–1 GB',
+    estimateVramGb: 0.45,
   },
 ];
 
@@ -94,6 +97,29 @@ const typeDotColor: Record<string, string> = {
   Image: '#10a37f',
   Voice: '#9CA3AF',
 };
+
+type CatalogueFilter = 'all' | CatalogueKind;
+
+const catalogueFilters: Array<{ value: CatalogueFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'llm', label: 'Text' },
+  { value: 'image', label: 'Image' },
+  { value: 'tts', label: 'Voice' },
+];
+
+const catalogueKindLabel: Record<CatalogueKind, string> = {
+  llm: 'Text',
+  image: 'Image',
+  tts: 'Voice',
+};
+
+/** "427 MB" / "2.1 GB" labels for the install specs. */
+function formatSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
+  if (bytes > 0) return `${Math.round(bytes / 1e3)} KB`;
+  return '—';
+}
 
 const kindToCardType: Record<ModelKind, CardType> = {
   llm: 'LLM',
@@ -146,6 +172,11 @@ export const Models: FC = () => {
   const [showLoadById, setShowLoadById] = useState(false);
   const [customId, setCustomId] = useState('');
   const [customType, setCustomType] = useState<ModelKind>('llm');
+  const [showCatalogue, setShowCatalogue] = useState(false);
+  const [catalogue, setCatalogue] = useState<CatalogueEntry[] | null>(null);
+  const [catalogueKind, setCatalogueKind] = useState<CatalogueFilter>('all');
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [installingId, setInstallingId] = useState<string | null>(null);
   const { snapshot: telemetry } = useTelemetry();
 
   const refresh = useCallback(async () => {
@@ -163,6 +194,39 @@ export const Models: FC = () => {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const loadCatalogue = useCallback(async () => {
+    try {
+      const res = await getModelCatalogue();
+      setCatalogue(res.data);
+      setCatalogueError(null);
+    } catch (err) {
+      setCatalogueError(
+        err instanceof Error ? err.message : 'Could not load the installable model catalogue',
+      );
+    }
+  }, []);
+
+  const toggleCatalogue = () => {
+    const next = !showCatalogue;
+    setShowCatalogue(next);
+    // Refreshed on open so install status stays accurate.
+    if (next) void loadCatalogue();
+  };
+
+  const handleInstall = async (entry: CatalogueEntry) => {
+    setInstallingId(entry.id);
+    setActionError(null);
+    setCatalogueError(null);
+    try {
+      await installModel(entry.id);
+      await Promise.all([refresh(), loadCatalogue()]);
+    } catch (err) {
+      setCatalogueError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setInstallingId(null);
+    }
+  };
 
   const runAction = async (id: string, action: () => Promise<unknown>) => {
     setBusyId(id);
@@ -212,6 +276,10 @@ export const Models: FC = () => {
     return matchesSearch && matchesFilter;
   });
 
+  const visibleCatalogue = (catalogue ?? []).filter(
+    entry => catalogueKind === 'all' || entry.kind === catalogueKind,
+  );
+
   const activeVramLoaded = modelsList.filter(m => m.status === 'running');
   const offloadedRam = modelsList.filter(m => m.status === 'offloaded');
 
@@ -260,13 +328,23 @@ export const Models: FC = () => {
           />
         </div>
 
-        <button
-          onClick={() => setShowLoadById(v => !v)}
-          className="btn-primary py-2 px-3.5 flex items-center gap-1.5 text-xs shrink-0 font-bold cursor-pointer"
-        >
-          <Plus size={15} strokeWidth={2.5} />
-          Load by ID
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={toggleCatalogue}
+            className="btn-primary py-2 px-3.5 flex items-center gap-1.5 text-xs shrink-0 font-bold cursor-pointer"
+          >
+            <Download size={15} strokeWidth={2.5} />
+            Install Models
+          </button>
+
+          <button
+            onClick={() => setShowLoadById(v => !v)}
+            className="btn-secondary py-2 px-3.5 flex items-center gap-1.5 text-xs shrink-0 font-bold cursor-pointer"
+          >
+            <Plus size={15} strokeWidth={2.5} />
+            Load by ID
+          </button>
+        </div>
       </div>
 
       {(fetchError || actionError) && (
@@ -310,6 +388,148 @@ export const Models: FC = () => {
             ) : null}
             Load
           </button>
+        </div>
+      )}
+
+      {showCatalogue && (
+        <div className="glass-panel aurora-glass p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Download size={15} className="text-primary shrink-0" />
+              <span className="font-bold text-sm text-text-primary shrink-0">Install a model</span>
+              <span className="text-[11px] text-text-secondary truncate">
+                Downloads the weights and loads them into Gabriel — no setup needed.
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {catalogueFilters.map(filter => (
+                <button
+                  key={filter.value}
+                  onClick={() => setCatalogueKind(filter.value)}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold transition-all cursor-pointer ${
+                    catalogueKind === filter.value
+                      ? 'bg-primary text-white shadow-xs'
+                      : 'bg-[var(--color-hover)] text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  {filter.label}
+                </button>
+              ))}
+              <button
+                onClick={() => setShowCatalogue(false)}
+                title="Close install panel"
+                aria-label="Close install panel"
+                className="ml-1 p-1.5 rounded-full bg-[var(--color-hover)] text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+
+          {catalogueError && (
+            <div className="flex items-center gap-2 text-xs text-danger font-semibold">
+              <AlertCircle size={14} className="shrink-0" />
+              <span className="truncate" title={catalogueError}>{catalogueError}</span>
+            </div>
+          )}
+
+          {catalogue === null ? (
+            <div className="flex items-center justify-center gap-2 text-xs text-text-secondary font-semibold py-4">
+              <Loader2 size={14} className="animate-spin" />
+              Loading catalogue…
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[46vh] overflow-y-auto pr-1">
+              {visibleCatalogue.map(entry => (
+                <div
+                  key={entry.id}
+                  className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-hover)] p-3.5 flex flex-col gap-2.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-bold text-xs text-text-primary truncate">{entry.name}</div>
+                      <div className="text-[10px] font-mono text-text-secondary truncate" title={entry.id}>
+                        {entry.id}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Pill variant="glass" size="xs" className="font-bold">
+                        {catalogueKindLabel[entry.kind]}
+                      </Pill>
+                      {entry.recommended && (
+                        <Pill variant="primary" size="xs" className="font-bold">
+                          Recommended
+                        </Pill>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-text-secondary leading-relaxed">{entry.summary}</p>
+
+                  <div className="grid grid-cols-3 gap-2 text-[10px] border-t border-[var(--color-border)] pt-2.5">
+                    <div>
+                      <div className="text-text-secondary font-medium">Download</div>
+                      <div className="font-mono font-bold text-text-primary">
+                        {formatSize(entry.download_bytes)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-text-secondary font-medium">VRAM</div>
+                      <div className="font-mono font-bold text-text-primary">
+                        {entry.recommended_vram_bytes > 0
+                          ? formatSize(entry.recommended_vram_bytes)
+                          : 'CPU only'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-text-secondary font-medium">RAM</div>
+                      <div className="font-mono font-bold text-text-primary">
+                        {formatSize(entry.recommended_ram_bytes)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-[10px] text-text-secondary font-mono truncate" title={entry.repo}>
+                    {entry.repo}
+                  </div>
+
+                  <div className="mt-auto pt-2.5 border-t border-[var(--color-border)] flex items-center justify-between gap-2">
+                    {entry.installed ? (
+                      <span className="flex items-center gap-1.5 text-[11px] font-bold text-[#10a37f]">
+                        <Check size={13} strokeWidth={3} />
+                        Installed
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-text-secondary font-semibold">Not installed</span>
+                    )}
+
+                    <button
+                      onClick={() => handleInstall(entry)}
+                      disabled={installingId !== null}
+                      className="btn-primary py-1.5 px-3 text-[11px] font-bold cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+                    >
+                      {installingId === entry.id ? (
+                        <>
+                          <Loader2 size={12} className="animate-spin" />
+                          Installing…
+                        </>
+                      ) : entry.installed ? (
+                        'Reinstall'
+                      ) : (
+                        'Install'
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {visibleCatalogue.length === 0 && (
+                <div className="col-span-full text-center text-xs text-text-secondary py-4">
+                  No models in this category.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

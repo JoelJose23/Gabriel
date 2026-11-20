@@ -3,8 +3,10 @@
 [env]
 CUDARC_CUDA_VERSION = "13000"
 
-# kokoro-tiny -> espeak-rs-sys needs these system libs at link time,
-# otherwise you get: undefined symbol: sonicDestroyStream, audio_object_*, etc.
-# (Same fix as: RUSTFLAGS="-L /usr/lib -l espeak-ng -l sonic -l pcaudio")
-[build]
-rustflags = ["-L", "/usr/lib", "-l", "espeak-ng", "-l", "sonic", "-l", "pcaudio"]
+# Legacy note: kokoro-tiny (the old native TTS backend) needed these system libs
+# at link time, otherwise you got: undefined symbol: sonicDestroyStream, audio_object_*, etc.
+# The TTS backend is now sherpa-onnx (tts-sherpa feature, enabled by default), so
+# espeak-ng/sonic/pcaudio are no longer required. Keep this snippet in case that
+# backend is ever revived:
+#[build]
+#rustflags = ["-L", "/usr/lib", "-l", "espeak-ng", "-l", "sonic", "-l", "pcaudio"]

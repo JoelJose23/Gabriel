@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::error::{GabrielError, Result};
-#[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
+#[cfg(feature = "candle-cuda")]
 use crate::inference::hub;
 use crate::inference::{BackendFactory, ImageBackend, SpeechBackend, TextBackend};
 use crate::telemetry::Telemetry;
@@ -59,8 +59,6 @@ pub struct JobGuard {
 
 impl JobGuard {
     pub fn new(model_id: String, registry: Arc<RwLock<Registry>>) -> Self {
-        // NOTE: You must add `inc_active_jobs` to `Registry` to prevent
-        // `least_recently_used_any_idle` from selecting this model.
         registry.write().inc_active_jobs(&model_id);
         Self { model_id, registry }
     }
@@ -68,7 +66,6 @@ impl JobGuard {
 
 impl Drop for JobGuard {
     fn drop(&mut self) {
-        // NOTE: You must add `dec_active_jobs` to `Registry`
         self.registry.write().dec_active_jobs(&self.model_id);
     }
 }
@@ -134,7 +131,11 @@ impl EngineInner {
             }
             Err(e) => {
                 tracing::error!(model = %real_id, error = %e, "chat stream failed");
-                self.events.record("error", "chat", format!("chat stream failed on {real_id}: {e}"));
+                self.events.record(
+                    "error",
+                    "chat",
+                    format!("chat stream failed on {real_id}: {e}"),
+                );
                 let _ = events.send(ChatEvent::Failed(e.to_string())).await;
             }
         }
@@ -174,9 +175,7 @@ impl EngineInner {
         self.touch_model(&real_id);
         let img_prompt = prompt.to_owned();
         let bg = backend.clone();
-        eprintln!("DEBUG run_image: before bg.generate()");
         let result = bg.generate(&img_prompt, width, height).await;
-        eprintln!("DEBUG run_image: after bg.generate()");
         tracing::info!("engine: generate returned: {:?}", result.is_ok());
         result
     }
@@ -186,6 +185,7 @@ impl EngineInner {
         model_id: &str,
         text: &str,
         voice: &str,
+        speed: f32,
         cpu_fallback: bool,
     ) -> Result<Vec<u8>> {
         let (real_id, handle) = {
@@ -211,7 +211,8 @@ impl EngineInner {
         let tts_voice = voice.to_owned();
         let bg = backend.clone();
 
-        bg.synthesize(&tts_text, &tts_voice, cpu_fallback).await
+        bg.synthesize(&tts_text, &tts_voice, speed, cpu_fallback)
+            .await
     }
 
     #[inline]
@@ -233,6 +234,7 @@ impl std::fmt::Debug for EngineState {
 
 impl EngineState {
     pub fn new(config: EngineConfig) -> Self {
+        config.ensure_workspace_dirs();
         let telemetry = Arc::new(Telemetry::new());
         let registry = Arc::new(RwLock::new(Registry::default()));
 
@@ -334,36 +336,31 @@ impl EngineState {
                 tracing::info!("engine: executing image job, acquiring semaphore");
                 let _permit = self.inner().image_permits.acquire().await;
                 tracing::info!("engine: semaphore acquired, ensuring ready");
-                eprintln!(
-                    "DEBUG execute: job_id={} reply={:p}",
-                    job.id, &reply as *const _
-                );
                 let result = match self.ensure_ready(&job.model_id, ModelType::Image).await {
                     Ok(real_id) => {
                         self.inner()
                             .run_image(&real_id, &prompt, width, height)
                             .await
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(e),
                 };
                 tracing::info!("engine: image job result: {:?}", result.is_ok());
-                eprintln!("DEBUG execute: sending result through reply={:p}", &reply);
                 let _ = reply.send(result);
-                eprintln!("DEBUG execute: send completed");
             }
             JobKind::Speech {
                 text,
                 voice,
+                speed,
                 reply,
                 cpu_fallback,
             } => {
                 let result = match self.ensure_ready(&job.model_id, ModelType::Tts).await {
                     Ok(real_id) => {
                         self.inner()
-                            .run_speech(&real_id, &text, &voice, cpu_fallback)
+                            .run_speech(&real_id, &text, &voice, speed, cpu_fallback)
                             .await
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(e),
                 };
                 let _ = reply.send(result);
             }
@@ -457,9 +454,6 @@ impl EngineState {
             reg.promote(model_id, handle);
         }
 
-        // Note: Removed `self.inner().pager.on_promoted(...)` to fix double-counting,
-        // as the actual budget state is already fully settled by admit/demote checks above.
-
         tracing::info!(
             model = %model_id,
             vram_bytes = final_spec.vram_bytes,
@@ -469,7 +463,10 @@ impl EngineState {
         self.inner().events.record(
             "info",
             "model",
-            format!("loaded {model_id} onto GPU ({} MB)", final_spec.vram_bytes / 1_000_000),
+            format!(
+                "loaded {model_id} onto GPU ({} MB)",
+                final_spec.vram_bytes / 1_000_000
+            ),
         );
 
         Ok(ModelStatus {
@@ -497,9 +494,11 @@ impl EngineState {
             self.inner().registry.write().demote(model_id);
             self.inner().pager.on_demoted_or_unloaded(spec.vram_bytes);
             tracing::info!(model = %model_id, "model offloaded VRAM -> RAM by request");
-            self.inner()
-                .events
-                .record("info", "model", format!("offloaded {model_id} VRAM -> RAM"));
+            self.inner().events.record(
+                "info",
+                "model",
+                format!("offloaded {model_id} VRAM -> RAM"),
+            );
         }
 
         Ok(ModelStatus {
@@ -636,6 +635,7 @@ impl EngineState {
         model_id: &str,
         text: String,
         voice: String,
+        speed: f32,
     ) -> Result<oneshot::Receiver<std::result::Result<Vec<u8>, GabrielError>>> {
         let model_id = self.ensure_ready(model_id, ModelType::Tts).await?;
 
@@ -650,7 +650,7 @@ impl EngineState {
         };
         let available_vram_budget = vram_limit.saturating_sub(snap.engine_resident_bytes as usize);
 
-        #[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
+        #[cfg(feature = "candle-cuda")]
         let cpu_fallback = {
             let actual_free = {
                 let gpu_used = hub::gpu_used_bytes().unwrap_or(0);
@@ -676,12 +676,11 @@ impl EngineState {
             }
             is_cpu
         };
-        #[cfg(not(any(feature = "candle-cuda", feature = "tts-kokoro")))]
+        #[cfg(not(feature = "candle-cuda"))]
         let cpu_fallback = {
             let is_cpu =
                 available_vram_budget != usize::MAX && available_vram_budget < tts_vram_required;
 
-            // FIX 4: Corrected telemetry logic to prevent reporting memory usage as free limit.
             if is_cpu {
                 tracing::info!(
                     free_mb = available_vram_budget / 1_000_000,
@@ -709,6 +708,7 @@ impl EngineState {
             kind: JobKind::Speech {
                 text,
                 voice,
+                speed,
                 reply: tx,
                 cpu_fallback,
             },
@@ -719,21 +719,17 @@ impl EngineState {
     }
 
     async fn enqueue(&self, job: Job) -> Result<()> {
-        self.inner()
-            .scheduler
-            .submit(job)
-            .await
-            .map_err(|j| {
-                self.inner().events.record(
-                    "error",
-                    "scheduler",
-                    format!("queue rejected job {} (queue saturated)", j.id),
-                );
-                GabrielError::QueueRejected {
-                    job_id: j.id.to_string(),
-                    reason: "queue saturated".into(),
-                }
-            })
+        self.inner().scheduler.submit(job).await.map_err(|j| {
+            self.inner().events.record(
+                "error",
+                "scheduler",
+                format!("queue rejected job {} (queue saturated)", j.id),
+            );
+            GabrielError::QueueRejected {
+                job_id: j.id.to_string(),
+                reason: "queue saturated".into(),
+            }
+        })
     }
 
     pub fn list_models(&self) -> Vec<ModelRuntimeInfo> {
@@ -783,6 +779,7 @@ impl EngineState {
     /// (max_loaded_models, auto_load_on_request, watermarks, governor),
     /// construction-time fields (host/port/queue/...) are picked up on restart.
     pub fn update_config(&self, new: EngineConfig) {
+        new.ensure_workspace_dirs();
         {
             let mut cfg = self.inner().config.write();
             *cfg = new.clone();
@@ -804,6 +801,52 @@ impl EngineState {
                 new.max_loaded_models, new.auto_load_on_request, new.vram_high_watermark
             ),
         );
+    }
+
+    pub fn update_storage_paths(
+        &self,
+        llm_dir: Option<String>,
+        image_dir: Option<String>,
+        tts_dir: Option<String>,
+    ) -> Result<crate::core::storage::StoragePathsDto> {
+        let mut cfg = self.inner().config.write();
+
+        if let Some(p) = llm_dir {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return Err(GabrielError::InvalidRequest(
+                    "llm_dir must not be empty".into(),
+                ));
+            }
+            cfg.llm_dir = std::path::PathBuf::from(trimmed);
+        }
+        if let Some(p) = image_dir {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return Err(GabrielError::InvalidRequest(
+                    "image_dir must not be empty".into(),
+                ));
+            }
+            cfg.image_dir = std::path::PathBuf::from(trimmed);
+        }
+        if let Some(p) = tts_dir {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return Err(GabrielError::InvalidRequest(
+                    "tts_dir must not be empty".into(),
+                ));
+            }
+            cfg.tts_dir = std::path::PathBuf::from(trimmed);
+        }
+
+        cfg.ensure_workspace_dirs();
+        cfg.save();
+
+        Ok(crate::core::storage::StoragePathsDto {
+            llm_dir: cfg.llm_dir.to_string_lossy().into_owned(),
+            image_dir: cfg.image_dir.to_string_lossy().into_owned(),
+            tts_dir: cfg.tts_dir.to_string_lossy().into_owned(),
+        })
     }
 
     /// Engine lifecycle event log backing `GET /v1/system/events`.

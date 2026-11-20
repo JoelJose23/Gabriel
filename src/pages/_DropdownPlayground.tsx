@@ -26,7 +26,7 @@ export const DropdownPlayground: FC = () => {
   const [model, setModel] = useState('llama-3.1-70b');
   const [imageModel, setImageModel] = useState('sdxl-lightning');
   const [steps, setSteps] = useState('8');
-  const [voiceModel, setVoiceModel] = useState('kokoro-tts');
+  const [voiceModel, setVoiceModel] = useState('sherpa-tts');
   const [preset, setPreset] = useState('af_sarah');
   const [engineMode, setEngineMode] = useState('balanced');
   const [sampler, setSampler] = useState('euler-a');

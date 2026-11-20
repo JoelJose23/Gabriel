@@ -4,11 +4,19 @@ pub mod events;
 pub mod pager;
 pub mod registry;
 pub mod scheduler;
+pub mod storage;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+fn default_workspace_root() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("gabriel")
+        .join("workspace")
+}
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -24,10 +32,14 @@ pub struct EngineConfig {
     pub bandwidth_ceiling_percent: f64,
     pub max_bandwidth_yield: Duration,
     pub max_loaded_models: usize,
+    pub llm_dir: PathBuf,
+    pub image_dir: PathBuf,
+    pub tts_dir: PathBuf,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
+        let root = default_workspace_root();
         Self {
             host: "127.0.0.1".into(),
             port: 8080,
@@ -41,6 +53,9 @@ impl Default for EngineConfig {
             bandwidth_ceiling_percent: 80.0,
             max_bandwidth_yield: Duration::from_millis(250),
             max_loaded_models: 4,
+            llm_dir: root.join("llm_blobs"),
+            image_dir: root.join("images"),
+            tts_dir: root.join("tts"),
         }
     }
 }
@@ -83,10 +98,20 @@ impl EngineConfig {
             tracing::warn!(path = %path.display(), error = %e, "failed to persist engine config");
         }
     }
+
+    /// Ensure all three workspace directories exist on disk.
+    pub fn ensure_workspace_dirs(&self) {
+        for dir in [&self.llm_dir, &self.image_dir, &self.tts_dir] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::warn!(dir = %dir.display(), error = %e, "failed to create workspace directory");
+            }
+        }
+    }
 }
 
 /// JSON representation of [`EngineConfig`] — durations become plain numbers
-/// (seconds / milliseconds) so the API surface stays ergonomic for the UI.
+/// (seconds / milliseconds) and paths become UTF-8 strings so the API surface
+/// stays ergonomic for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EngineConfigDto {
@@ -102,6 +127,9 @@ pub struct EngineConfigDto {
     pub bandwidth_ceiling_percent: f64,
     pub max_bandwidth_yield_ms: u64,
     pub max_loaded_models: usize,
+    pub llm_dir: String,
+    pub image_dir: String,
+    pub tts_dir: String,
 }
 
 impl Default for EngineConfigDto {
@@ -125,6 +153,9 @@ impl From<EngineConfig> for EngineConfigDto {
             bandwidth_ceiling_percent: c.bandwidth_ceiling_percent,
             max_bandwidth_yield_ms: c.max_bandwidth_yield.as_millis() as u64,
             max_loaded_models: c.max_loaded_models,
+            llm_dir: c.llm_dir.to_string_lossy().into_owned(),
+            image_dir: c.image_dir.to_string_lossy().into_owned(),
+            tts_dir: c.tts_dir.to_string_lossy().into_owned(),
         }
     }
 }
@@ -144,6 +175,9 @@ impl From<EngineConfigDto> for EngineConfig {
             bandwidth_ceiling_percent: d.bandwidth_ceiling_percent,
             max_bandwidth_yield: Duration::from_millis(d.max_bandwidth_yield_ms),
             max_loaded_models: d.max_loaded_models,
+            llm_dir: PathBuf::from(d.llm_dir.trim()),
+            image_dir: PathBuf::from(d.image_dir.trim()),
+            tts_dir: PathBuf::from(d.tts_dir.trim()),
         }
     }
 }
@@ -186,6 +220,15 @@ impl EngineConfigDto {
         if self.max_loaded_models == 0 {
             return Err("max_loaded_models must be at least 1".into());
         }
+        if self.llm_dir.trim().is_empty() {
+            return Err("llm_dir must not be empty".into());
+        }
+        if self.image_dir.trim().is_empty() {
+            return Err("image_dir must not be empty".into());
+        }
+        if self.tts_dir.trim().is_empty() {
+            return Err("tts_dir must not be empty".into());
+        }
         Ok(())
     }
 }
@@ -204,6 +247,9 @@ mod tests {
         assert_eq!(back.vram_high_watermark, cfg.vram_high_watermark);
         assert_eq!(back.idle_offload_after, cfg.idle_offload_after);
         assert_eq!(back.max_bandwidth_yield, cfg.max_bandwidth_yield);
+        assert_eq!(back.llm_dir, cfg.llm_dir);
+        assert_eq!(back.image_dir, cfg.image_dir);
+        assert_eq!(back.tts_dir, cfg.tts_dir);
     }
 
     #[test]
@@ -211,6 +257,13 @@ mod tests {
         let mut dto = EngineConfigDto::default();
         dto.vram_low_watermark = 0.9;
         dto.vram_high_watermark = 0.5;
+        assert!(dto.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_empty_workspace_dirs() {
+        let mut dto = EngineConfigDto::default();
+        dto.tts_dir = "   ".into();
         assert!(dto.validate().is_err());
     }
 }

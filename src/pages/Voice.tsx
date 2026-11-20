@@ -16,7 +16,9 @@ import { ModelBadge } from '../components/shared';
 import { Select } from '../components/shared/Select';
 import { listModels, synthesizeSpeech } from '../api';
 
-/** Kokoro voices accepted by the engine (`af_`/`am_`/`bf_` pass through). */
+/** Voice presets accepted by the engine. Sherpa-ONNX maps each name to a
+ * speaker ID (`alloy`→0, `nova`→1, …); Kokoro-ONNX model folders accept the
+ * `af_`/`am_`/`bf_` IDs directly and single-speaker Piper models ignore it. */
 const voicePresets = [
   { id: 'af_sarah', name: 'Sarah (US Female)', lang: 'en-US' },
   { id: 'am_adam', name: 'Adam (US Male)', lang: 'en-US' },
@@ -86,6 +88,15 @@ export const Voice: FC = () => {
   }, []);
 
   const selected = ttsModels.find(m => m.id === selectedModel);
+
+  // Sherpa-ONNX reports its sample rate on load, but the REST surface doesn't
+  // expose it yet — infer it from the model family for the info panel.
+  const sampleRateLabel = (() => {
+    const id = selectedModel.toLowerCase();
+    if (id.includes('kokoro')) return '24 kHz';
+    if (id.includes('piper') || id.includes('vits')) return '22.05 kHz';
+    return '—';
+  })();
 
   const formatTime = (t: number) => {
     if (!Number.isFinite(t)) return '0:00';
@@ -411,7 +422,7 @@ export const Voice: FC = () => {
             </div>
 
             <div className="text-[10px] text-text-secondary leading-relaxed pt-1">
-              Pitch and stability are engine-managed by the Kokoro backend and not exposed through the API.
+              Pitch and stability are engine-managed by the Sherpa-ONNX backend and not exposed through the API.
             </div>
           </div>
 
@@ -427,7 +438,7 @@ export const Voice: FC = () => {
               </div>
               <div className="flex justify-between">
                 <span>Sample Rate</span>
-                <span className="font-mono text-text-primary font-bold">24 kHz</span>
+                <span className="font-mono text-text-primary font-bold">{sampleRateLabel}</span>
               </div>
             </div>
           </div>

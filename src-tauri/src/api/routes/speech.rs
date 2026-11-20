@@ -1,8 +1,8 @@
+use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::Response;
-use axum::Json;
 
 use crate::core::engine::EngineState;
 use crate::error::{ApiError, GabrielError};
@@ -30,9 +30,10 @@ pub async fn audio_speech(
 
     let model_id = req.model.clone();
     let voice = req.voice.unwrap_or_else(|| "alloy".into());
+    let voice_meta = voice.clone();
 
     let rx = engine
-        .submit_speech(&model_id, req.input.clone(), voice)
+        .submit_speech(&model_id, req.input.clone(), voice, req.speed)
         .await
         .map_err(ApiError)?;
 
@@ -40,6 +41,20 @@ pub async fn audio_speech(
         .await
         .map_err(|_| ApiError(GabrielError::Internal("speech job dropped".into())))?
         .map_err(ApiError)?;
+
+    let tts_dir = engine.config().tts_dir;
+    if let Err(e) = crate::core::storage::save_tts_artifact(
+        &tts_dir,
+        &wav,
+        &req.input,
+        &voice_meta,
+        &model_id,
+        req.speed,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to persist TTS artifact to workspace");
+    }
 
     Response::builder()
         .status(axum::http::StatusCode::OK)

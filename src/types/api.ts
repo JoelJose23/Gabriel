@@ -42,6 +42,30 @@ export interface ModelStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Installable model catalogue (/v1/models/catalogue)
+// ---------------------------------------------------------------------------
+
+export type CatalogueKind = 'llm' | 'image' | 'tts';
+
+export interface CatalogueEntry {
+  id: string;
+  name: string;
+  kind: CatalogueKind;
+  summary: string;
+  repo: string;
+  download_bytes: number;
+  recommended_vram_bytes: number;
+  recommended_ram_bytes: number;
+  recommended: boolean;
+  installed: boolean;
+}
+
+export interface ModelCatalogueResponse {
+  object: 'list';
+  data: CatalogueEntry[];
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 

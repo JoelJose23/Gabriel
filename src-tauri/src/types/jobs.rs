@@ -36,6 +36,8 @@ pub enum JobKind {
     Speech {
         text: String,
         voice: String,
+        /// Speech rate multiplier (0.25–4.0, 1.0 = native model speed).
+        speed: f32,
         reply: tokio::sync::oneshot::Sender<Result<Vec<u8>, crate::error::GabrielError>>,
         /// Adaptive scheduler hint: true = CPU fallback (VRAM tight), false = GPU
         cpu_fallback: bool,

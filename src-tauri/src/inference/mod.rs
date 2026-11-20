@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod catalogue;
 pub mod image_codec;
 pub mod stub;
 
@@ -11,15 +12,14 @@ use crate::types::{GenParams, ModelSpec};
 
 #[cfg(feature = "candle-cuda")]
 pub mod candle_backend;
-#[cfg(any(feature = "candle-cuda", feature = "tts-kokoro"))]
+#[cfg(feature = "candle-cuda")]
 pub(crate) mod hub;
 #[cfg(feature = "candle-cuda")]
 pub mod image;
 #[cfg(feature = "candle-cuda")]
 pub mod image_candle;
-#[cfg(feature = "tts-kokoro")]
-#[allow(dead_code)]
-pub mod tts_kokoro;
+#[cfg(feature = "tts-sherpa")]
+pub mod tts_download;
 #[cfg(feature = "tts-sherpa")]
 pub mod tts_sherpa;
 
@@ -48,7 +48,8 @@ pub trait ImageBackend: Send + Sync + std::fmt::Debug {
 
 #[async_trait]
 pub trait SpeechBackend: Send + Sync + std::fmt::Debug {
-    async fn synthesize(&self, text: &str, voice: &str, force_cpu: bool) -> Result<Vec<u8>>;
+    async fn synthesize(&self, text: &str, voice: &str, speed: f32, force_cpu: bool)
+        -> Result<Vec<u8>>;
 }
 
 #[derive(Debug, Clone)]
@@ -82,11 +83,10 @@ impl BackendFactory {
             || lower.ends_with(".gguf")
             || lower.ends_with(".safetensors")
             || lower.ends_with(".onnx");
-        #[cfg(not(any(
-            feature = "candle-cuda",
-            feature = "tts-kokoro",
-            feature = "tts-sherpa"
-        )))]
+        #[cfg(all(
+            not(feature = "candle-cuda"),
+            not(feature = "tts-sherpa")
+        ))]
         let _ = is_real;
 
         #[cfg(feature = "candle-cuda")]
@@ -113,11 +113,6 @@ impl BackendFactory {
         #[cfg(feature = "tts-sherpa")]
         if is_real && spec.model_type == crate::types::ModelType::Tts {
             let backend = tts_sherpa::SherpaSpeechBackend::load(spec.id.clone()).await?;
-            return Ok(ModelHandle::Speech(Arc::new(backend)));
-        }
-        #[cfg(all(not(feature = "tts-sherpa"), feature = "tts-kokoro"))]
-        if is_real && spec.model_type == crate::types::ModelType::Tts {
-            let backend = tts_kokoro::KokoroSpeechBackend::load(spec.id.clone()).await?;
             return Ok(ModelHandle::Speech(Arc::new(backend)));
         }
 
